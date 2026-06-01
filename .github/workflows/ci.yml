@@ -35,6 +35,16 @@ jobs:
           test -f requirements.txt
           test -f README.md
 
+      - name: Lint Python with Ruff
+        uses: astral-sh/ruff-action@v4.0.0
+        with:
+          args: check --output-format=github .
+
+      - name: Check Python formatting with Ruff
+        uses: astral-sh/ruff-action@v4.0.0
+        with:
+          args: format --check .
+
       - name: Prepare local env for compose validation
         run: cp .env.example .env
 

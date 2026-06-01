@@ -41,7 +41,7 @@ message -> stop words -> LLM check -> delete / notify admin -> log
 - Telegram framework: `aiogram 3.x`
 - Cache/state storage: `redis:8.8.0-alpine3.23`
 - Runtime: Docker Compose
-- CI: GitHub Actions + Docker Buildx
+- CI: GitHub Actions, Ruff, Docker Buildx
 
 ## Быстрый старт
 
@@ -118,6 +118,8 @@ docker compose ps
 CI выполняет:
 
 - проверку обязательных файлов;
+- линтинг Python-кода через Ruff;
+- проверку форматирования через Ruff;
 - валидацию `docker compose config`;
 - сборку Docker-образа через Buildx;
 - запуск Redis;
