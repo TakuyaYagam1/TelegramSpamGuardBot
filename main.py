@@ -16,7 +16,9 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN, session=session)
     dp = Dispatcher()
     dp.include_router(router)
-    await bot.set_my_commands([BotCommand(command="verify", description="Подтвердить, что я человек")])
+    await bot.set_my_commands(
+        [BotCommand(command="verify", description="Подтвердить, что я человек")]
+    )
     logger.info("Bot starting")
     try:
         await dp.start_polling(
