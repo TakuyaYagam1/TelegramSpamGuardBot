@@ -111,6 +111,30 @@ docker compose ps
 
 Адрес сервера, токены и реальные ключи не хранятся в репозитории.
 
+## Модуль верификации
+
+Модуль реализован в `handlers/verification.py`, `db/database.py`, `utils/logger.py`, `config.py`.
+
+**Логика:**
+1. При вступлении нового участника бот отправляет сообщение с кнопкой «Я человек ✅» и запускает таймер 180 секунд.
+2. Если пользователь нажимает кнопку или отправляет `/verify` — таймер отменяется, запись удаляется из БД.
+3. Если таймер истекает — бот выкидывает пользователя через `ban + unban` (не вечный бан).
+
+**Запуск без Docker:**
+
+```bash
+cp .env.example .env
+# заполнить BOT_TOKEN и ADMIN_ID в .env
+pip install -r requirements.txt
+python main.py
+```
+
+**Экспортируемые интерфейсы для команды:**
+- `db.database.get_pending(user_id, chat_id)` → `row | None`
+- `db.database.remove_pending(user_id, chat_id)`
+- `config.ACTION_MODE` — `'delete'` | `'notify_admin'`
+- `utils.logger.logger` — настроенный логгер
+
 ## CI/CD
 
 В репозитории настроен CI для проверки инфраструктуры и контейнерной сборки.
