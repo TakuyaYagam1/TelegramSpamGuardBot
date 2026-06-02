@@ -35,28 +35,27 @@ async def update_timer_message(
     msg_id: int,
     keyboard: InlineKeyboardMarkup,
     total: int = 180,
-    interval: int = 30,
 ) -> None:
     remaining = total
-    while True:
-        await asyncio.sleep(interval)
-        remaining -= interval
-        if remaining <= 0:
-            return
-        minutes = remaining // 60
-        seconds = remaining % 60
-        text = f"Подтвердите, что вы человек. Осталось: {minutes}:{seconds:02d}"
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=text,
-                reply_markup=keyboard,
-            )
-        except TelegramBadRequest:
-            pass
-        except Exception as exc:
-            logger.debug("Timer update error for %s in %s: %s", user_id, chat_id, exc)
+    try:
+        while remaining > 0:
+            await asyncio.sleep(1)
+            remaining -= 1
+            minutes = remaining // 60
+            seconds = remaining % 60
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"Подтвердите, что вы человек. Осталось: {minutes}:{seconds:02d}",
+                    reply_markup=keyboard,
+                )
+            except TelegramBadRequest:
+                pass
+            except Exception as exc:
+                logger.debug("Timer update error for %s in %s: %s", user_id, chat_id, exc)
+    except asyncio.CancelledError:
+        pass
 
 
 async def kick_if_not_verified(
@@ -71,6 +70,19 @@ async def kick_if_not_verified(
         await bot.unban_chat_member(chat_id, user_id)
         await remove_pending(user_id, chat_id)
         logger.info("Kicked unverified user %s from chat %s", user_id, chat_id)
+        try:
+            member = await bot.get_chat_member(chat_id, user_id)
+            kick_text = f"Пользователь {member.user.full_name} был удалён за не прохождение верификации"
+        except Exception:
+            kick_text = "Пользователь был удалён за не прохождение верификации"
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=kick_text,
+                message_thread_id=row["message_thread_id"],
+            )
+        except Exception as exc:
+            logger.debug("Failed to send kick notification for %s in %s: %s", user_id, chat_id, exc)
     except Exception as exc:
         logger.error("Failed to kick user %s from chat %s: %s", user_id, chat_id, exc)
     finally:
