@@ -41,6 +41,8 @@ async def update_timer_message(
         while remaining > 0:
             await asyncio.sleep(1)
             remaining -= 1
+            if remaining % 5 != 0:
+                continue
             minutes = remaining // 60
             seconds = remaining % 60
             try:
@@ -114,14 +116,6 @@ async def on_unverified_message(message: Message, bot: Bot) -> None:
         await bot.delete_message(chat_id, message.message_id)
     except TelegramBadRequest:
         pass
-    try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text="Сначала пройдите верификацию — нажмите кнопку в приветственном сообщении.",
-            message_thread_id=message.message_thread_id,
-        )
-    except TelegramBadRequest:
-        pass
     logger.info("Deleted message from unverified user %s in chat %s", user_id, chat_id)
 
 
@@ -154,6 +148,7 @@ async def on_new_member(event: ChatMemberUpdated, bot: Bot) -> None:
         text=(
             f"Привет, {new.user.full_name}! "
             "Нажми кнопку ниже в течение 3 минут, чтобы подтвердить, что ты человек."
+            "\n\n⚠️ Пока вы не верифицированы, ваши сообщения будут удаляться."
         ),
         message_thread_id=thread_id,
         reply_markup=keyboard,
