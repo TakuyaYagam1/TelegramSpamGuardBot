@@ -1,20 +1,20 @@
 import asyncio
-
 from aiogram import Bot, Dispatcher
-
+from aiogram.client.session.aiohttp import AiohttpSession
 from config import BOT_TOKEN
 from db.database import init_db
 from handlers.verification import router
 from utils.logger import logger
 
+PROXY_URL = "socks5://127.0.0.1:12334"
+
 
 async def main() -> None:
     await init_db()
-
-    bot = Bot(token=BOT_TOKEN)
+    session = AiohttpSession(proxy=PROXY_URL)
+    bot = Bot(token=BOT_TOKEN, session=session)
     dp = Dispatcher()
     dp.include_router(router)
-
     logger.info("Bot starting")
     try:
         await dp.start_polling(

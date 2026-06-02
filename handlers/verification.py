@@ -53,7 +53,9 @@ async def update_timer_message(
             except TelegramBadRequest:
                 pass
             except Exception as exc:
-                logger.debug("Timer update error for %s in %s: %s", user_id, chat_id, exc)
+                logger.debug(
+                    "Timer update error for %s in %s: %s", user_id, chat_id, exc
+                )
     except asyncio.CancelledError:
         pass
 
@@ -82,7 +84,12 @@ async def kick_if_not_verified(
                 message_thread_id=row["message_thread_id"],
             )
         except Exception as exc:
-            logger.debug("Failed to send kick notification for %s in %s: %s", user_id, chat_id, exc)
+            logger.debug(
+                "Failed to send kick notification for %s in %s: %s",
+                user_id,
+                chat_id,
+                exc,
+            )
     except Exception as exc:
         logger.error("Failed to kick user %s from chat %s: %s", user_id, chat_id, exc)
     finally:
