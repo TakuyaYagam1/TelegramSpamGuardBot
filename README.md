@@ -41,7 +41,7 @@ message -> stop words -> LLM check -> delete / notify admin -> log
 - Telegram framework: `aiogram 3.x`
 - Cache/state storage: `redis:8.8.0-alpine3.23`
 - Runtime: Docker Compose
-- CI: GitHub Actions, Ruff, Docker Buildx
+- CI: GitHub Actions, pytest, Ruff, Docker Buildx
 
 ## Быстрый старт
 
@@ -117,6 +117,9 @@ docker compose ps
 
 CI выполняет:
 
+- запуск на каждом `push` в любую ветку, на pull request и вручную через `workflow_dispatch`;
+- отдельную job с pytest, если в репозитории есть тесты;
+- выгрузку `pytest-results.xml` в артефакты workflow;
 - проверку обязательных файлов;
 - линтинг Python-кода через Ruff;
 - проверку форматирования через Ruff;
