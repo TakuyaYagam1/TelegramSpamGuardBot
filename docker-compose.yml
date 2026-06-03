@@ -6,6 +6,7 @@ services:
     image: anti-spam-telegram-bot
     environment:
       BOT_TOKEN: ${BOT_TOKEN:-replace_me}
+      TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       VERIFY_TIMEOUT_SECONDS: ${VERIFY_TIMEOUT_SECONDS:-180}
       ACTION_MODE: ${ACTION_MODE:-notify_admin}

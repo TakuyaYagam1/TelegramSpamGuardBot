@@ -8,6 +8,7 @@ from app.core.models import ActionMode
 
 class Settings(BaseSettings):
     bot_token: SecretStr
+    telegram_proxy_url: str | None = None
     redis_url: str
     verify_timeout_seconds: int = Field(gt=0)
     action_mode: ActionMode

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 
 from app.cache.redis import (
     BlacklistRepository,
@@ -57,6 +58,12 @@ def include_application_router(dispatcher: Dispatcher, router: Any) -> None:
         # Module-level routers retain their parent; reset for repeatable factories
         router._parent_router = None
     dispatcher.include_router(router)
+
+
+def create_bot_session(settings: Settings) -> AiohttpSession | None:
+    if settings.telegram_proxy_url is None:
+        return None
+    return AiohttpSession(proxy=settings.telegram_proxy_url)
 
 
 def _redis_key_text(key: Any) -> str:
@@ -221,7 +228,13 @@ def create_application(
     resolved_settings = settings or Settings()
     logger = configure_logging(resolved_settings)
 
-    bot = bot_factory(token=resolved_settings.bot_token.get_secret_value())
+    bot_session = create_bot_session(resolved_settings)
+    bot_kwargs: dict[str, Any] = {
+        "token": resolved_settings.bot_token.get_secret_value()
+    }
+    if bot_session is not None:
+        bot_kwargs["session"] = bot_session
+    bot = bot_factory(**bot_kwargs)
     dispatcher = dispatcher_factory()
     redis = redis_client or create_redis_client(resolved_settings.redis_url)
 

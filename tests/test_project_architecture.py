@@ -4,7 +4,7 @@ import tokenize
 from pathlib import Path
 import tomllib
 
-from app.__main__ import ALLOWED_UPDATES, build_parser
+from app.__main__ import ALLOWED_UPDATES, build_parser, create_application
 from app.cache.redis import PendingVerificationRepository, RuntimeSettingsRepository
 from app.config import Settings
 from app.core.llm.client import LLMClient
@@ -76,6 +76,7 @@ def test_pyproject_declares_runtime_and_tooling() -> None:
     dependencies = set(pyproject["project"]["dependencies"])
     assert dependencies == {
         "aiogram>=3,<4",
+        "aiohttp-socks>=0.10,<1",
         "httpx>=0.28,<1",
         "pydantic-settings>=2,<3",
         "redis>=5,<7",
@@ -122,3 +123,38 @@ def test_ci_always_runs_pytest_for_this_project() -> None:
     assert "Skip pytest" not in workflow
     assert "Detect tests" not in workflow
     assert "steps.tests.outputs.found" not in workflow
+
+
+def test_application_uses_telegram_proxy_session_when_configured() -> None:
+    captured_bot_kwargs: dict[str, object] = {}
+
+    class FakeBot:
+        def __init__(self, **kwargs: object) -> None:
+            captured_bot_kwargs.update(kwargs)
+            self.session = object()
+
+    class FakeRedis:
+        pass
+
+    settings = Settings(
+        bot_token="token",
+        telegram_proxy_url="socks5://xray:10808",
+        redis_url="redis://redis:6379/0",
+        verify_timeout_seconds=180,
+        action_mode=ActionMode.NOTIFY_ADMIN,
+        admin_username="@admin",
+        llm_api_key="llm-token",
+        llm_base_url="https://api.example.com/v1",
+        llm_model="model",
+        llm_timeout_seconds=8,
+        log_file="spam.log",
+    )
+
+    create_application(
+        settings,
+        bot_factory=FakeBot,
+        redis_client=FakeRedis(),
+    )
+
+    assert captured_bot_kwargs["token"] == "token"
+    assert captured_bot_kwargs["session"].proxy == "socks5://xray:10808"

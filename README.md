@@ -133,6 +133,7 @@ docker compose down
 
 ```env
 BOT_TOKEN=...
+TELEGRAM_PROXY_URL=
 REDIS_URL=redis://redis:6379/0
 VERIFY_TIMEOUT_SECONDS=180
 ACTION_MODE=notify_admin
