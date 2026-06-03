@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+from app.bot.controller.v1.verification import handle_chat_member_update
 from app.infrastructure.redis import (
     PendingVerificationRepository,
     VerifiedUserRepository,
@@ -20,6 +21,7 @@ from app.usecase.verification import (
     block_unverified_join_request_after_timeout,
     build_verification_message,
     build_verification_timeout_message,
+    cleanup_pending_member_verification,
     complete_verification_from_callback,
     remove_unverified_user_after_timeout,
     start_join_request_verification,
@@ -396,5 +398,86 @@ def test_join_request_timeout_declines_kicks_and_cleans_pending() -> None:
         assert bot.bans == [{"chat_id": -100123, "user_id": 42}]
         assert bot.unbans == [{"chat_id": -100123, "user_id": 42}]
         assert await pending_repository.get(chat_id=-100123, user_id=42) is None
+
+    asyncio.run(run())
+
+
+def test_cleanup_pending_member_verification_deletes_challenge_and_cancels_tasks() -> (
+    None
+):
+    async def run() -> None:
+        redis = FakeRedis()
+        pending_repository = PendingVerificationRepository(redis, ttl_seconds=180)
+        await pending_repository.create(
+            user_id=42,
+            chat_id=-100123,
+            verification_message_id=777,
+            message_thread_id=None,
+        )
+        timeout_task = asyncio.create_task(_sleep_forever())
+        countdown_task = asyncio.create_task(_sleep_forever())
+        timeout_tasks = {(-100123, 42): timeout_task}
+        countdown_tasks = {(-100123, 42): countdown_task}
+        bot = FakeBot()
+
+        cleaned = await cleanup_pending_member_verification(
+            bot=bot,
+            pending_verification_repository=pending_repository,
+            chat_id=-100123,
+            user_id=42,
+            task_registry=timeout_tasks,
+            countdown_task_registry=countdown_tasks,
+        )
+
+        assert cleaned is True
+        assert await pending_repository.get(chat_id=-100123, user_id=42) is None
+        assert bot.deleted_messages == [{"chat_id": -100123, "message_id": 777}]
+        assert timeout_tasks == {}
+        assert countdown_tasks == {}
+        assert timeout_task.cancelled() or timeout_task.cancelling() > 0
+        assert countdown_task.cancelled() or countdown_task.cancelling() > 0
+
+    asyncio.run(run())
+
+
+def test_chat_member_leave_update_cleans_pending_verification_challenge() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+        pending_repository = PendingVerificationRepository(redis, ttl_seconds=180)
+        await pending_repository.create(
+            user_id=42,
+            chat_id=-100123,
+            verification_message_id=777,
+            message_thread_id=None,
+        )
+        registries = VerificationTaskRegistry()
+        registries.timeout_task[(-100123, 42)] = asyncio.create_task(_sleep_forever())
+        registries.countdown_task[(-100123, 42)] = asyncio.create_task(_sleep_forever())
+        bot = FakeBot()
+        update = SimpleNamespace(
+            chat=SimpleNamespace(id=-100123),
+            old_chat_member=SimpleNamespace(
+                status="restricted",
+                user=SimpleNamespace(id=42, is_bot=False, full_name="Test User"),
+            ),
+            new_chat_member=SimpleNamespace(
+                status="left",
+                user=SimpleNamespace(id=42, is_bot=False, full_name="Test User"),
+            ),
+        )
+
+        cleaned = await handle_chat_member_update(
+            update=update,
+            bot=bot,
+            pending_verification_repository=pending_repository,
+            settings=SimpleNamespace(verify_timeout_seconds=180),
+            verification_task_registry=registries,
+        )
+
+        assert cleaned is True
+        assert await pending_repository.get(chat_id=-100123, user_id=42) is None
+        assert bot.deleted_messages == [{"chat_id": -100123, "message_id": 777}]
+        assert registries.timeout_task == {}
+        assert registries.countdown_task == {}
 
     asyncio.run(run())

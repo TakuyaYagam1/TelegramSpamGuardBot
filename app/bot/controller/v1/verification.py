@@ -16,6 +16,7 @@ from app.observability.logging import get_logger
 from app.usecase.verification import (
     VERIFY_CALLBACK_PREFIX,
     VerificationTaskRegistry,
+    cleanup_pending_member_verification,
     complete_verification_from_callback,
     start_join_request_verification,
     start_member_verification,
@@ -24,6 +25,7 @@ from app.usecase.verification import (
 router = Router(name="verification")
 JOINED_MEMBER_STATUSES = {"member", "restricted"}
 PRE_JOIN_STATUSES = {"left", "kicked"}
+LEFT_MEMBER_STATUSES = {"left", "kicked"}
 
 
 def _member_status(member: object) -> str:
@@ -35,6 +37,12 @@ def _joined_from_outside(update: ChatMemberUpdated) -> bool:
     old_status = _member_status(update.old_chat_member)
     new_status = _member_status(update.new_chat_member)
     return old_status in PRE_JOIN_STATUSES and new_status in JOINED_MEMBER_STATUSES
+
+
+def _left_after_join(update: ChatMemberUpdated) -> bool:
+    old_status = _member_status(update.old_chat_member)
+    new_status = _member_status(update.new_chat_member)
+    return old_status in JOINED_MEMBER_STATUSES and new_status in LEFT_MEMBER_STATUSES
 
 
 async def handle_chat_join_request(
@@ -87,11 +95,22 @@ async def handle_chat_member_update(
     settings: Settings,
     verification_task_registry: VerificationTaskRegistry,
 ) -> bool:
-    if not _joined_from_outside(update):
-        return False
-
     user = update.new_chat_member.user
     if getattr(user, "is_bot", False):
+        return False
+
+    if _left_after_join(update):
+        return await cleanup_pending_member_verification(
+            bot=bot,
+            pending_verification_repository=pending_verification_repository,
+            chat_id=update.chat.id,
+            user_id=user.id,
+            task_registry=verification_task_registry.timeout_task,
+            countdown_task_registry=verification_task_registry.countdown_task,
+            logger=get_logger("app"),
+        )
+
+    if not _joined_from_outside(update):
         return False
 
     return await start_member_verification(
