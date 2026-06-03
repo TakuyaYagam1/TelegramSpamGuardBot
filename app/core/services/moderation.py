@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any
 
@@ -11,6 +12,12 @@ from app.logging import get_logger, log_spam_event
 from app.tg_bot.utils.telegram_api import call_telegram_api
 
 
+@dataclass(frozen=True)
+class NotificationTarget:
+    kind: str
+    value: str
+
+
 class ModerationService:
     async def notify_admin_about_spam(
         self,
@@ -19,34 +26,34 @@ class ModerationService:
         message: Any,
         spam_result: SpamDetectionResult,
         settings: Settings,
+        notification_target: str | None = None,
         logger: logging.Logger | None = None,
     ) -> SpamDetectionResult:
         chat_id = int(message.chat.id)
         user_id = int(message.from_user.id)
         message_text = str(getattr(message, "text", "") or "")
         event_logger = logger or get_logger("app")
-        admin_target = _format_admin_target(settings)
+        admin_target = _resolve_notification_target(
+            settings=settings,
+            runtime_target=notification_target,
+        )
+        admin_target_text = _format_admin_target(admin_target)
         spammer = _format_spammer(message.from_user)
         message_reference = build_message_reference(message)
         notification_text = (
-            f"{admin_target}, обнаружен спам.\n"
+            f"{admin_target_text}, обнаружен спам.\n"
             f"Пользователь: {spammer}\n"
             f"user_id: {user_id}\n"
             f"Причина: {spam_result.reason}\n"
             f"Сообщение: {message_reference}\n"
             f"Текст: {message_text}"
         )
-        send_kwargs: dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": notification_text,
-        }
-        message_thread_id = getattr(message, "message_thread_id", None)
-        if message_thread_id is not None:
-            send_kwargs["message_thread_id"] = int(message_thread_id)
-
-        await call_telegram_api(
-            operation=ModerationAction.NOTIFY_ADMIN.value,
-            call=bot.send_message(**send_kwargs),
+        await _send_admin_notification(
+            bot=bot,
+            target=admin_target,
+            group_chat_id=chat_id,
+            message=message,
+            text=notification_text,
             chat_id=chat_id,
             user_id=user_id,
             message_text=message_text,
@@ -55,7 +62,7 @@ class ModerationService:
 
         action = ModerationAction.NOTIFY_ADMIN.value
         details = (
-            f"admin={admin_target}; "
+            f"admin={admin_target_text}; "
             f"spammer={spammer}; "
             f"reason={spam_result.reason}; "
             f"llm_decision={spam_result.llm_decision.value}; "
@@ -129,11 +136,76 @@ class ModerationService:
         return replace(spam_result, moderation_action=ModerationAction.DELETE_MESSAGE)
 
 
-def _format_admin_target(settings: Settings) -> str:
+async def _send_admin_notification(
+    *,
+    bot: Any,
+    target: NotificationTarget,
+    group_chat_id: int,
+    message: Any,
+    text: str,
+    chat_id: int,
+    user_id: int,
+    message_text: str,
+    logger: logging.Logger,
+) -> None:
+    send_kwargs: dict[str, Any] = {"text": text}
+    if target.kind == "user_id":
+        send_kwargs["chat_id"] = int(target.value)
+    else:
+        send_kwargs["chat_id"] = group_chat_id
+        message_thread_id = getattr(message, "message_thread_id", None)
+        if message_thread_id is not None:
+            send_kwargs["message_thread_id"] = int(message_thread_id)
+
+    await call_telegram_api(
+        operation=ModerationAction.NOTIFY_ADMIN.value,
+        call=bot.send_message(**send_kwargs),
+        chat_id=chat_id,
+        user_id=user_id,
+        message_text=message_text,
+        logger=logger,
+    )
+
+
+def _resolve_notification_target(
+    *,
+    settings: Settings,
+    runtime_target: str | None,
+) -> NotificationTarget:
+    parsed_runtime_target = _parse_notification_target(runtime_target)
+    if parsed_runtime_target is not None:
+        return parsed_runtime_target
+
+    if settings.admin_id is not None:
+        return NotificationTarget(kind="user_id", value=str(settings.admin_id))
+
     if settings.admin_username:
-        username = settings.admin_username.strip()
-        return username if username.startswith("@") else f"@{username}"
-    return f"admin_id:{settings.admin_id}"
+        return NotificationTarget(
+            kind="username",
+            value=settings.admin_username.strip().lstrip("@"),
+        )
+
+    return NotificationTarget(kind="username", value="admin")
+
+
+def _parse_notification_target(raw_target: str | None) -> NotificationTarget | None:
+    if raw_target is None:
+        return None
+
+    target = raw_target.strip()
+    if not target:
+        return None
+
+    if target.lstrip("-").isdigit():
+        return NotificationTarget(kind="user_id", value=str(int(target)))
+
+    return NotificationTarget(kind="username", value=target.lstrip("@"))
+
+
+def _format_admin_target(target: NotificationTarget) -> str:
+    if target.kind == "user_id":
+        return f"admin_id:{target.value}"
+    return f"@{target.value}"
 
 
 def _format_spammer(from_user: Any) -> str:

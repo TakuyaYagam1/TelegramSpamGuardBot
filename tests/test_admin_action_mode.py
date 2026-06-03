@@ -16,7 +16,9 @@ from app.tg_bot.handlers.admin import (
     handle_action_mode_callback,
     handle_action_mode_command,
     handle_admin_panel_command,
+    handle_notification_target_command,
     is_admin_sender,
+    is_authorized_admin_sender,
     parse_action_mode_argument,
 )
 
@@ -24,7 +26,9 @@ from app.tg_bot.handlers.admin import (
 @dataclass
 class FakeRuntimeSettingsRepository:
     action_mode: ActionMode | None = None
+    notification_target: str | None = None
     reset_called: bool = False
+    notification_reset_called: bool = False
 
     async def get_action_mode(self, *, default: ActionMode) -> ActionMode:
         return self.action_mode or default
@@ -36,11 +40,22 @@ class FakeRuntimeSettingsRepository:
         self.action_mode = None
         self.reset_called = True
 
+    async def get_notification_target(self, *, chat_id: int) -> str | None:
+        return self.notification_target
+
+    async def set_notification_target(self, *, chat_id: int, target: str) -> None:
+        self.notification_target = target
+
+    async def reset_notification_target(self, *, chat_id: int) -> None:
+        self.notification_target = None
+        self.notification_reset_called = True
+
 
 @dataclass
 class FakeMessage:
     text: str
     from_user: SimpleNamespace
+    chat: SimpleNamespace | None = None
     answers: list[str] = field(default_factory=list)
     reply_markups: list[Any] = field(default_factory=list)
 
@@ -51,6 +66,7 @@ class FakeMessage:
 
 @dataclass
 class FakeCallbackMessage:
+    chat: SimpleNamespace | None = None
     edited_texts: list[str] = field(default_factory=list)
     reply_markups: list[Any] = field(default_factory=list)
 
@@ -68,6 +84,15 @@ class FakeCallbackQuery:
 
     async def answer(self, **kwargs: Any) -> None:
         self.answers.append(kwargs)
+
+
+@dataclass
+class FakeBot:
+    admin_user_ids: set[int]
+
+    async def get_chat_member(self, *, chat_id: int, user_id: int) -> SimpleNamespace:
+        status = "administrator" if user_id in self.admin_user_ids else "member"
+        return SimpleNamespace(status=status)
 
 
 def _settings(
@@ -101,6 +126,7 @@ def _message(
     return FakeMessage(
         text=text,
         from_user=SimpleNamespace(id=user_id, username=username),
+        chat=SimpleNamespace(id=-100123, type="supergroup"),
     )
 
 
@@ -140,6 +166,21 @@ def test_is_admin_sender_accepts_configured_id_or_username() -> None:
         message=_message(text="/mode", user_id=8, username="other"),
         settings=settings,
     )
+
+
+def test_authorized_admin_sender_accepts_real_chat_admin_without_env_admin() -> None:
+    async def run() -> None:
+        message = _message(text="/mode delete", user_id=99, username="other")
+
+        result = await is_authorized_admin_sender(
+            message=message,
+            settings=_settings(admin_id=None, admin_username=None),
+            bot=FakeBot(admin_user_ids={99}),
+        )
+
+        assert result is True
+
+    asyncio.run(run())
 
 
 def test_action_mode_command_sets_runtime_mode_for_admin() -> None:
@@ -215,6 +256,43 @@ def test_action_mode_command_rejects_non_admin_sender() -> None:
         assert message.answers == [
             "❌ Недостаточно прав для изменения режима модерации"
         ]
+
+    asyncio.run(run())
+
+
+def test_notification_target_command_sets_sender_as_private_target() -> None:
+    async def run() -> None:
+        repository = FakeRuntimeSettingsRepository()
+        message = _message(text="/notify me", user_id=42, username="admin_user")
+
+        result = await handle_notification_target_command(
+            message=message,
+            settings=_settings(),
+            runtime_settings_repository=repository,
+        )
+
+        assert result == "42"
+        assert repository.notification_target == "42"
+        assert message.answers == ["✅ Получатель уведомлений изменен: 42"]
+
+    asyncio.run(run())
+
+
+def test_notification_target_command_resets_to_env_default() -> None:
+    async def run() -> None:
+        repository = FakeRuntimeSettingsRepository(notification_target="@other_admin")
+        message = _message(text="/notify reset")
+
+        result = await handle_notification_target_command(
+            message=message,
+            settings=_settings(admin_id=None, admin_username="@admin_user"),
+            runtime_settings_repository=repository,
+        )
+
+        assert result == "@admin_user"
+        assert repository.notification_target is None
+        assert repository.notification_reset_called is True
+        assert message.answers == ["✅ Получатель уведомлений сброшен: @admin_user"]
 
     asyncio.run(run())
 

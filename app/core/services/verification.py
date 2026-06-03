@@ -6,7 +6,12 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.cache.redis import (
     BlacklistRepository,
@@ -23,6 +28,20 @@ VERIFY_SUCCESS_CALLBACK_ANSWER = "✅ Готово, доступ открыт"
 VERIFY_SUCCESS_PRIVATE_MESSAGE = "✅ Готово, доступ открыт. Добро пожаловать в чат"
 VERIFY_WRONG_USER_CALLBACK_ANSWER = "❌ Эта кнопка не для вас"
 VERIFY_EXPIRED_CALLBACK_ANSWER = "❌ Проверка уже недействительна"
+UNVERIFIED_MEMBER_PERMISSIONS = ChatPermissions(can_send_messages=False)
+VERIFIED_MEMBER_PERMISSIONS = ChatPermissions(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True,
+    can_react_to_messages=True,
+)
 
 
 @dataclass(frozen=True)
@@ -244,6 +263,18 @@ async def _complete_pending_verification(
             chat_id=pending.chat_id,
             user_id=pending.user_id,
         )
+    else:
+        await _call_telegram_api_best_effort(
+            operation="restore_verified_member_permissions",
+            call=bot.restrict_chat_member(
+                chat_id=pending.chat_id,
+                user_id=pending.user_id,
+                permissions=VERIFIED_MEMBER_PERMISSIONS,
+            ),
+            chat_id=pending.chat_id,
+            user_id=pending.user_id,
+            logger=get_logger("app"),
+        )
 
     await verified_user_repository.mark_verified(
         chat_id=pending.chat_id,
@@ -381,6 +412,16 @@ async def remove_unverified_user_after_timeout(
         logger=event_logger,
     )
     await pending_verification_repository.delete(chat_id=chat_id, user_id=user_id)
+    await _call_telegram_api_best_effort(
+        operation="delete_verification_message",
+        call=bot.delete_message(
+            chat_id=pending.verification_chat_id or pending.chat_id,
+            message_id=pending.verification_message_id,
+        ),
+        chat_id=chat_id,
+        user_id=user_id,
+        logger=event_logger,
+    )
 
     log_app_event(
         event_logger,
@@ -391,6 +432,26 @@ async def remove_unverified_user_after_timeout(
         details="unverified user removed after verification timeout",
     )
     return True
+
+
+async def restrict_unverified_member(
+    *,
+    bot: Any,
+    chat_id: int,
+    user_id: int,
+    logger: logging.Logger,
+) -> None:
+    await _call_telegram_api_best_effort(
+        operation="restrict_unverified_member",
+        call=bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=UNVERIFIED_MEMBER_PERMISSIONS,
+        ),
+        chat_id=chat_id,
+        user_id=user_id,
+        logger=logger,
+    )
 
 
 async def block_unverified_join_request_after_timeout(
@@ -604,5 +665,82 @@ async def start_join_request_verification(
         user_id=user_id,
         action="send_private_challenge",
         details=f"user_chat_id={user_chat_id}",
+    )
+    return True
+
+
+async def start_member_verification(
+    *,
+    bot: Any,
+    pending_verification_repository: PendingVerificationRepository,
+    blacklist_repository: BlacklistRepository,
+    chat_id: int,
+    user_id: int,
+    user_full_name: str | None,
+    timeout_seconds: int,
+    message_thread_id: int | None = None,
+    task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    logger: logging.Logger | None = None,
+) -> bool:
+    event_logger = logger or get_logger("app")
+    if await blacklist_repository.contains(chat_id=chat_id, user_id=user_id):
+        await _call_telegram_api_best_effort(
+            operation="ban_blacklisted_member",
+            call=bot.ban_chat_member(chat_id=chat_id, user_id=user_id),
+            chat_id=chat_id,
+            user_id=user_id,
+            logger=event_logger,
+        )
+        await _call_telegram_api_best_effort(
+            operation="unban_blacklisted_member",
+            call=bot.unban_chat_member(chat_id=chat_id, user_id=user_id),
+            chat_id=chat_id,
+            user_id=user_id,
+            logger=event_logger,
+        )
+        return False
+
+    pending = await pending_verification_repository.get(
+        chat_id=chat_id, user_id=user_id
+    )
+    if pending is not None:
+        return False
+
+    await restrict_unverified_member(
+        bot=bot,
+        chat_id=chat_id,
+        user_id=user_id,
+        logger=event_logger,
+    )
+    sent_message = await send_verification_message(
+        bot,
+        chat_id=chat_id,
+        user_id=user_id,
+        user_full_name=user_full_name,
+        message_thread_id=message_thread_id,
+        timeout_seconds=timeout_seconds,
+    )
+    await pending_verification_repository.create(
+        user_id=user_id,
+        chat_id=chat_id,
+        verification_message_id=int(sent_message.message_id),
+        message_thread_id=message_thread_id,
+    )
+    schedule_unverified_user_removal(
+        bot=bot,
+        pending_verification_repository=pending_verification_repository,
+        chat_id=chat_id,
+        user_id=user_id,
+        timeout_seconds=timeout_seconds,
+        task_registry=task_registry,
+        logger=event_logger,
+    )
+    log_app_event(
+        event_logger,
+        event="member_verification_started",
+        chat_id=chat_id,
+        user_id=user_id,
+        action="restrict_and_send_group_challenge",
+        details="normal member join fallback",
     )
     return True

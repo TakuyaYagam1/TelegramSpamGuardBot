@@ -54,9 +54,13 @@ class FakeBlacklistRepository:
 @dataclass
 class FakeRuntimeSettingsRepository:
     action_mode: ActionMode
+    notification_target: str | None = None
 
     async def get_action_mode(self, *, default: ActionMode) -> ActionMode:
         return self.action_mode
+
+    async def get_notification_target(self, *, chat_id: int) -> str | None:
+        return self.notification_target
 
 
 class FakeSpamDetectorService:
@@ -71,6 +75,7 @@ def _settings(*, action_mode: str, log_file: Path) -> Settings:
         verify_timeout_seconds=180,
         action_mode=action_mode,
         admin_username="admin_user",
+        admin_id=None,
         llm_api_key=SecretStr("llm-secret"),
         llm_base_url="https://llm.example/v1",
         llm_model="test-model",
@@ -209,6 +214,37 @@ def test_notify_admin_action_without_topic_omits_message_thread_id(
 
         assert len(bot.sent_messages) == 1
         assert "message_thread_id" not in bot.sent_messages[0]
+
+    asyncio.run(run())
+
+
+def test_notify_admin_action_sends_private_message_for_numeric_target(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        log_file = tmp_path / "spam.log"
+        logger = configure_logging(
+            _settings(action_mode="notify_admin", log_file=log_file)
+        )
+        bot = FakeBot()
+
+        try:
+            await ModerationService().notify_admin_about_spam(
+                bot=bot,
+                message=_message(message_thread_id=777),
+                spam_result=_spam_result(),
+                settings=_settings(action_mode="notify_admin", log_file=log_file),
+                notification_target="1242888754",
+                logger=logger,
+            )
+        finally:
+            close_logger_handlers(logger)
+
+        assert len(bot.sent_messages) == 1
+        sent = bot.sent_messages[0]
+        assert sent["chat_id"] == 1242888754
+        assert "message_thread_id" not in sent
+        assert "admin_id:1242888754" in str(sent["text"])
 
     asyncio.run(run())
 

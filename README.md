@@ -153,7 +153,7 @@ LOG_FILE=/app/logs/spam.log
 - `REDIS_URL` - адрес Redis внутри Compose-сети.
 - `VERIFY_TIMEOUT_SECONDS` - время ожидания верификации нового пользователя.
 - `ACTION_MODE` - реакция на спам: `delete` или `notify_admin`.
-- `ADMIN_USERNAME` / `ADMIN_ID` - получатель уведомлений для `notify_admin`; достаточно одного значения.
+- `ADMIN_USERNAME` / `ADMIN_ID` - fallback-получатель уведомлений для `notify_admin`.
 - `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_SECONDS` - параметры OpenAI-compatible LLM provider.
 - `LOG_LEVEL` и `LOG_FILE` - уровень логирования и путь к `spam.log`.
 
@@ -162,7 +162,7 @@ LOG_FILE=/app/logs/spam.log
 - `delete`: удалить спам-сообщение и заблокировать пользователя;
 - `notify_admin`: отправить уведомление администратору.
 
-Режим можно переключать без изменения `.env` и без рестарта контейнера. Администратор из `ADMIN_ID` или `ADMIN_USERNAME` может открыть панель командой `/admin` или `/help`, а затем выбрать режим inline-кнопками `Удалять спам`, `Только уведомлять` или `Сбросить к env`.
+Режим можно переключать без изменения `.env` и без рестарта контейнера. Реальный администратор Telegram-чата может открыть панель командой `/admin` или `/help`, а затем выбрать режим inline-кнопками `Удалять спам`, `Только уведомлять` или `Сбросить к env`. `ADMIN_ID` и `ADMIN_USERNAME` используются как fallback для личных команд и дефолтного получателя уведомлений.
 
 Также доступны текстовые команды:
 
@@ -173,9 +173,14 @@ LOG_FILE=/app/logs/spam.log
 /mode delete
 /mode notify_admin
 /mode reset
+/notify
+/notify me
+/notify @username
+/notify 123456789
+/notify reset
 ```
 
-Значение, заданное через `/mode delete` или `/mode notify_admin`, хранится в Redis в ключе `settings:action_mode` и имеет приоритет над `.env`. Команда `/mode reset` удаляет runtime override и возвращает режим из `ACTION_MODE`.
+Значение, заданное через `/mode delete` или `/mode notify_admin`, хранится в Redis в ключе `settings:action_mode` и имеет приоритет над `.env`. Команда `/mode reset` удаляет runtime override и возвращает режим из `ACTION_MODE`. Получатель из `/notify ...` хранится в Redis per-chat в ключе `settings:notification_target:{chat_id}`; numeric id отправляет уведомления в ЛС, `@username` оставляет уведомление в чате с mention.
 
 ## Запуск на сервере
 

@@ -32,7 +32,12 @@ from app.tg_bot.handlers import (
 from app.tg_bot.middlewares import RedisMiddleware
 
 
-ALLOWED_UPDATES: tuple[str, ...] = ("message", "callback_query", "chat_join_request")
+ALLOWED_UPDATES: tuple[str, ...] = (
+    "message",
+    "callback_query",
+    "chat_join_request",
+    "chat_member",
+)
 RESTORED_TIMER_SAFETY_MARGIN_SECONDS = 0.25
 
 

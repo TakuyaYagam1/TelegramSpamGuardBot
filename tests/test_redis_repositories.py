@@ -162,3 +162,27 @@ def test_runtime_settings_repository_discards_invalid_action_mode() -> None:
         assert "settings:action_mode" not in redis.values
 
     asyncio.run(run())
+
+
+def test_runtime_settings_repository_reads_writes_and_resets_notification_target() -> (
+    None
+):
+    async def run() -> None:
+        redis = FakeRedis()
+        repository = RuntimeSettingsRepository(redis)
+
+        assert await repository.get_notification_target(chat_id=-100123) is None
+
+        await repository.set_notification_target(
+            chat_id=-100123,
+            target="1242888754",
+        )
+
+        assert redis.values["settings:notification_target:-100123"] == "1242888754"
+        assert await repository.get_notification_target(chat_id=-100123) == "1242888754"
+
+        await repository.reset_notification_target(chat_id=-100123)
+
+        assert "settings:notification_target:-100123" not in redis.values
+
+    asyncio.run(run())

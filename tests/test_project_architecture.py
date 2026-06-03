@@ -33,7 +33,7 @@ def test_clean_architecture_import_paths_are_available() -> None:
 def test_package_entrypoint_parser_name_matches_python_module() -> None:
     assert build_parser().prog == "python -m app"
     assert "chat_join_request" in ALLOWED_UPDATES
-    assert "chat_member" not in ALLOWED_UPDATES
+    assert "chat_member" in ALLOWED_UPDATES
 
 
 def test_project_files_match_clean_architecture() -> None:

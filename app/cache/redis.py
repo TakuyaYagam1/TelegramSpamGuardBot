@@ -15,6 +15,7 @@ LLM_CACHE_TTL_SECONDS = 3 * 24 * 60 * 60
 MIN_LLM_CACHE_TTL_SECONDS = 24 * 60 * 60
 MAX_LLM_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 ACTION_MODE_KEY = "settings:action_mode"
+NOTIFICATION_TARGET_KEY_PREFIX = "settings:notification_target"
 
 
 def create_redis_client(redis_url: str) -> Redis:
@@ -188,3 +189,16 @@ class RuntimeSettingsRepository:
 
     async def reset_action_mode(self) -> None:
         await self._redis.delete(ACTION_MODE_KEY)
+
+    @staticmethod
+    def notification_target_key(chat_id: int) -> str:
+        return f"{NOTIFICATION_TARGET_KEY_PREFIX}:{chat_id}"
+
+    async def get_notification_target(self, *, chat_id: int) -> str | None:
+        return await self._redis.get(self.notification_target_key(chat_id))
+
+    async def set_notification_target(self, *, chat_id: int, target: str) -> None:
+        await self._redis.set(self.notification_target_key(chat_id), target)
+
+    async def reset_notification_target(self, *, chat_id: int) -> None:
+        await self._redis.delete(self.notification_target_key(chat_id))

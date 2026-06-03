@@ -112,11 +112,19 @@ async def _apply_moderation_action(
         )
 
     if action_mode == ActionMode.NOTIFY_ADMIN:
+        notification_target = None
+        if runtime_settings_repository is not None:
+            notification_target = (
+                await runtime_settings_repository.get_notification_target(
+                    chat_id=int(message.chat.id)
+                )
+            )
         return await moderation_service.notify_admin_about_spam(
             bot=bot,
             message=message,
             spam_result=result,
             settings=settings,
+            notification_target=notification_target,
         )
 
     return result

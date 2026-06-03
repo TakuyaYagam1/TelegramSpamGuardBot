@@ -20,6 +20,7 @@ from app.core.services.verification import (
     complete_verification_from_callback,
     remove_unverified_user_after_timeout,
     start_join_request_verification,
+    start_member_verification,
 )
 
 
@@ -60,6 +61,7 @@ class FakeBot:
     deleted_messages: list[dict[str, int]] = field(default_factory=list)
     bans: list[dict[str, int]] = field(default_factory=list)
     unbans: list[dict[str, int]] = field(default_factory=list)
+    restrictions: list[dict[str, Any]] = field(default_factory=list)
     approved_join_requests: list[dict[str, int]] = field(default_factory=list)
     declined_join_requests: list[dict[str, int]] = field(default_factory=list)
 
@@ -75,6 +77,9 @@ class FakeBot:
 
     async def unban_chat_member(self, **kwargs: int) -> None:
         self.unbans.append(kwargs)
+
+    async def restrict_chat_member(self, **kwargs: Any) -> None:
+        self.restrictions.append(kwargs)
 
     async def approve_chat_join_request(self, **kwargs: int) -> None:
         self.approved_join_requests.append(kwargs)
@@ -146,11 +151,48 @@ def test_complete_verification_from_callback_marks_verified_and_cleans_pending()
         assert completed is True
         assert await pending_repository.get(chat_id=-100123, user_id=42) is None
         assert await verified_repository.is_verified(chat_id=-100123, user_id=42)
+        assert bot.restrictions[0]["chat_id"] == -100123
+        assert bot.restrictions[0]["user_id"] == 42
+        assert bot.restrictions[0]["permissions"].can_send_messages is True
         assert bot.deleted_messages == [{"chat_id": -100123, "message_id": 777}]
         assert bot.sent_messages == []
         assert callback.answers == [{"text": VERIFY_SUCCESS_CALLBACK_ANSWER}]
         assert task_registry == {}
         assert task.cancelled() or task.cancelling() > 0
+
+    asyncio.run(run())
+
+
+def test_start_member_verification_restricts_and_sends_group_challenge() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+        pending_repository = PendingVerificationRepository(redis, ttl_seconds=180)
+        blacklist_repository = BlacklistRepository(redis)
+        bot = FakeBot()
+        task_registry: dict[tuple[int, int], asyncio.Task[bool]] = {}
+
+        started = await start_member_verification(
+            bot=bot,
+            pending_verification_repository=pending_repository,
+            blacklist_repository=blacklist_repository,
+            chat_id=-100123,
+            user_id=42,
+            user_full_name="Test User",
+            timeout_seconds=180,
+            task_registry=task_registry,
+        )
+
+        assert started is True
+        assert bot.restrictions[0]["chat_id"] == -100123
+        assert bot.restrictions[0]["user_id"] == 42
+        assert bot.restrictions[0]["permissions"].can_send_messages is False
+        assert bot.sent_messages[0]["chat_id"] == -100123
+        assert str(bot.sent_messages[0]["text"]).startswith("⚠️ Test User")
+        assert await pending_repository.get(chat_id=-100123, user_id=42) is not None
+        assert (-100123, 42) in task_registry
+
+        for task in task_registry.values():
+            task.cancel()
 
     asyncio.run(run())
 
