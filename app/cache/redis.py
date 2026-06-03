@@ -11,8 +11,8 @@ from app.core.models import ActionMode, DuplicateMessageState, PendingVerificati
 from redis.asyncio import Redis
 
 
-LLM_CACHE_TTL_SECONDS = 3 * 24 * 60 * 60
-MIN_LLM_CACHE_TTL_SECONDS = 24 * 60 * 60
+LLM_CACHE_TTL_SECONDS = 5 * 60
+MIN_LLM_CACHE_TTL_SECONDS = 60
 MAX_LLM_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 ACTION_MODE_KEY = "settings:action_mode"
 ACTION_MODE_KEY_PREFIX = "settings:action_mode"
@@ -144,7 +144,7 @@ class LLMResultCacheRepository:
         ttl_seconds: int = LLM_CACHE_TTL_SECONDS,
     ) -> None:
         if not MIN_LLM_CACHE_TTL_SECONDS <= ttl_seconds <= MAX_LLM_CACHE_TTL_SECONDS:
-            raise ValueError("LLM cache TTL must be from 1 to 7 days")
+            raise ValueError("LLM cache TTL must be from 60 seconds to 7 days")
 
         self._redis = redis
         self._ttl_seconds = ttl_seconds

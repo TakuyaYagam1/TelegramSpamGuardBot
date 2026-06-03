@@ -296,7 +296,10 @@ def create_application(
         ttl_seconds=resolved_settings.duplicate_message_window_seconds,
         warning_ttl_seconds=resolved_settings.duplicate_message_warning_ttl_seconds,
     )
-    llm_cache_repository = LLMResultCacheRepository(redis)
+    llm_cache_repository = LLMResultCacheRepository(
+        redis,
+        ttl_seconds=resolved_settings.llm_cache_ttl_seconds,
+    )
     llm_client = LLMClient.from_settings(resolved_settings)
     spam_detector_service = SpamDetectorService(
         llm_client=llm_client,

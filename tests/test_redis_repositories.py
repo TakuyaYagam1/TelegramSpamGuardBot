@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from app.cache.redis import (
     BlacklistRepository,
     DuplicateMessageRepository,
+    LLMResultCacheRepository,
     PendingVerificationRepository,
     RuntimeSettingsRepository,
     VerifiedUserRepository,
@@ -118,6 +119,22 @@ def test_blacklist_repository_adds_and_reads_key_without_ttl() -> None:
         assert "blacklist:-100123:42" not in redis.expirations
         assert await repository.contains(chat_id=-100123, user_id=42) is True
         assert await repository.contains(chat_id=-100123, user_id=43) is False
+
+    asyncio.run(run())
+
+
+def test_llm_cache_repository_uses_short_default_ttl() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+        repository = LLMResultCacheRepository(redis)
+
+        await repository.set("казино промокод", "да")
+
+        key = repository.key("казино промокод")
+        assert redis.values[key] == "да"
+        assert redis.expirations[key] == 300
+        assert await repository.get("казино промокод") == "да"
+        assert await repository.get_ttl("казино промокод") == 300
 
     asyncio.run(run())
 

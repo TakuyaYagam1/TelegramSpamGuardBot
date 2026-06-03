@@ -75,7 +75,7 @@ PostgreSQL, Alembic, `app/database/` and `migrations/` are intentionally not inc
 - `verified:{chat_id}:{user_id}` - отметка, что пользователь прошел верификацию;
 - `duplicate_message:{chat_id}:{user_id}` - текущая серия одинаковых сообщений пользователя с TTL;
 - `duplicate_message_warning:{chat_id}:{user_id}` - digest flood-сообщения, за которое пользователь уже получил предупреждение;
-- `llm:{sha256}` - кеш ответа LLM на нормализованный текст сообщения.
+- `llm:{sha256}` - кеш ответа LLM на нормализованный текст сообщения с TTL из `LLM_CACHE_TTL_SECONDS`.
 
 При старте приложение выполняет `PING` Redis и восстанавливает таймеры для активных `verify:*` ключей. Если ключ поврежден или не имеет TTL, он безопасно удаляется и событие пишется в лог. Восстановленный timeout для join request отклоняет заявку и банит пользователя.
 
@@ -87,7 +87,7 @@ PostgreSQL, Alembic, `app/database/` and `migrations/` are intentionally not inc
 
 После нажатия кнопки бот вызывает `approve_chat_join_request`, удаляет приватное challenge-сообщение, отправляет личное `✅ Готово, доступ открыт`, отмечает пользователя как verified и очищает pending-запись. Если timeout истек, бот отправляет личное `❌ Проверка не пройдена`, вызывает `decline_chat_join_request`, `ban_chat_member` и удаляет pending-запись.
 
-LLM-интеграция работает через OpenAI-compatible `/chat/completions`: задаются `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` и timeout. В обычном spam-flow LLM вызывается только после совпадения stop-word. Для файлов без текста бот проверяет доступные метаданные: `file_name`, `mime_type`, emoji/set name стикера и caption. Отдельно бот детерминированно отслеживает одинаковые сообщения подряд: текст сравнивается по нормализованной строке, стикеры и медиа - по `file_unique_id`. При достижении `DUPLICATE_MESSAGE_WARN_THRESHOLD` бот удаляет накопленные дубли и предупреждает пользователя, а следующий такой же повтор в течение `DUPLICATE_MESSAGE_WARNING_TTL_SECONDS` приводит к kick через ban/unban. Ответы LLM `да/yes` считаются спамом, `нет/no` - не спамом; при timeout, ошибке или непонятном ответе обычный stop-word flow применяет fallback на ключевые слова.
+LLM-интеграция работает через OpenAI-compatible `/chat/completions`: задаются `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` и timeout. В обычном spam-flow LLM вызывается только после совпадения stop-word, а ответ кешируется на `LLM_CACHE_TTL_SECONDS`, по умолчанию 300 секунд. Для файлов без текста бот проверяет доступные метаданные: `file_name`, `mime_type`, emoji/set name стикера и caption. Отдельно бот детерминированно отслеживает одинаковые сообщения подряд: текст сравнивается по нормализованной строке, стикеры и медиа - по `file_unique_id`. При достижении `DUPLICATE_MESSAGE_WARN_THRESHOLD` бот удаляет накопленные дубли и предупреждает пользователя, а следующий такой же повтор в течение `DUPLICATE_MESSAGE_WARNING_TTL_SECONDS` приводит к kick через ban/unban. Ответы LLM `да/yes` считаются спамом, `нет/no` - не спамом; при timeout, ошибке или непонятном ответе обычный stop-word flow применяет fallback на ключевые слова.
 
 ## Словари stop-words
 
@@ -176,6 +176,7 @@ LLM_API_KEY=...
 LLM_BASE_URL=...
 LLM_MODEL=...
 LLM_TIMEOUT_SECONDS=8
+LLM_CACHE_TTL_SECONDS=300
 LOG_LEVEL=INFO
 LOG_FILE=/app/logs/spam.log
 ```
@@ -186,11 +187,12 @@ LOG_FILE=/app/logs/spam.log
 - `REDIS_URL` - адрес Redis внутри Compose-сети.
 - `VERIFY_TIMEOUT_SECONDS` - время ожидания верификации нового пользователя.
 - `DUPLICATE_MESSAGE_WINDOW_SECONDS` - окно, в котором считаются одинаковые сообщения подряд от одного пользователя.
-- `DUPLICATE_MESSAGE_WARN_THRESHOLD` - сколько одинаковых сообщений подряд нужно для LLM-проверки и предупреждения.
+- `DUPLICATE_MESSAGE_WARN_THRESHOLD` - сколько одинаковых сообщений подряд нужно для удаления дублей и предупреждения.
 - `DUPLICATE_MESSAGE_WARNING_TTL_SECONDS` - сколько действует предупреждение перед kick при новом таком же повторе.
 - `ACTION_MODE` - реакция на спам: `delete` или `notify_admin`.
 - `ADMIN_USERNAME` / `ADMIN_ID` - fallback-получатель уведомлений для `notify_admin`.
 - `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_SECONDS` - параметры OpenAI-compatible LLM provider.
+- `LLM_CACHE_TTL_SECONDS` - сколько хранить ответ LLM для одного текста, по умолчанию 300 секунд.
 - `LOG_LEVEL` и `LOG_FILE` - уровень логирования и путь к `spam.log`.
 
 `ACTION_MODE` принимает значения:

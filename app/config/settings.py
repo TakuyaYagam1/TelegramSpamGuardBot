@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     llm_base_url: str
     llm_model: str
     llm_timeout_seconds: int = Field(gt=0)
+    llm_cache_ttl_seconds: int = Field(default=300, ge=60, le=7 * 24 * 60 * 60)
     log_level: str = "INFO"
     log_file: str
 
