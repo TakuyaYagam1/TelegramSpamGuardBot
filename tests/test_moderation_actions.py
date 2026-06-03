@@ -109,7 +109,9 @@ def _read_log(logger_name_log_file: Path) -> str:
     return logger_name_log_file.read_text(encoding="utf-8")
 
 
-def test_delete_action_deletes_ban_unbans_blacklists_and_logs(tmp_path: Path) -> None:
+def test_delete_action_deletes_ban_unbans_without_blacklist_and_logs(
+    tmp_path: Path,
+) -> None:
     async def run() -> None:
         log_file = tmp_path / "spam.log"
         logger = configure_logging(_settings(action_mode="delete", log_file=log_file))
@@ -134,7 +136,7 @@ def test_delete_action_deletes_ban_unbans_blacklists_and_logs(tmp_path: Path) ->
         assert bot.bans == [{"chat_id": -100123, "user_id": 42}]
         assert bot.unbans == [{"chat_id": -100123, "user_id": 42}]
         assert bot.sent_messages == []
-        assert blacklist_repository.added == [(-100123, 42)]
+        assert blacklist_repository.added == []
 
         log_text = _read_log(log_file)
         assert "spam_detected" in log_text
@@ -278,6 +280,6 @@ def test_text_moderation_uses_runtime_action_mode_over_env_default(
         assert result.moderation_action == ModerationAction.DELETE_MESSAGE
         assert bot.deleted_messages == [{"chat_id": -100123, "message_id": 55}]
         assert bot.sent_messages == []
-        assert blacklist_repository.added == [(-100123, 42)]
+        assert blacklist_repository.added == []
 
     asyncio.run(run())

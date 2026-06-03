@@ -117,7 +117,6 @@ class ModerationService:
             message_text=message_text,
             logger=event_logger,
         )
-        await blacklist_repository.add(chat_id=chat_id, user_id=user_id)
 
         action = ModerationAction.DELETE_MESSAGE.value
         details = (

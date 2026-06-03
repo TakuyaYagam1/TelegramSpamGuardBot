@@ -1,10 +1,17 @@
 import ast
+import asyncio
 import io
 import tokenize
 from pathlib import Path
 import tomllib
 
-from app.__main__ import ALLOWED_UPDATES, build_parser, create_application
+from app.__main__ import (
+    ALLOWED_UPDATES,
+    BOT_COMMANDS,
+    build_parser,
+    create_application,
+    set_bot_commands,
+)
 from app.cache.redis import PendingVerificationRepository, RuntimeSettingsRepository
 from app.config import Settings
 from app.core.llm.client import LLMClient
@@ -158,3 +165,60 @@ def test_application_uses_telegram_proxy_session_when_configured() -> None:
 
     assert captured_bot_kwargs["token"] == "token"
     assert captured_bot_kwargs["session"].proxy == "socks5://xray:10808"
+
+
+def test_bot_commands_are_registered_for_telegram_menu() -> None:
+    class FakeBot:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        async def delete_my_commands(self, **kwargs: object) -> None:
+            self.calls.append({"method": "delete_my_commands", **kwargs})
+
+        async def set_my_commands(
+            self, commands: list[object], **kwargs: object
+        ) -> None:
+            self.calls.append(
+                {"method": "set_my_commands", "commands": commands, **kwargs}
+            )
+
+    bot = FakeBot()
+    settings = Settings(
+        bot_token="token",
+        redis_url="redis://redis:6379/0",
+        verify_timeout_seconds=180,
+        action_mode=ActionMode.NOTIFY_ADMIN,
+        admin_username="@admin",
+        admin_id=42,
+        llm_api_key="llm-token",
+        llm_base_url="https://api.example.com/v1",
+        llm_model="model",
+        llm_timeout_seconds=8,
+        log_file="spam.log",
+    )
+
+    asyncio.run(set_bot_commands(bot, settings))
+
+    assert [command.command for command in BOT_COMMANDS] == [
+        "admin",
+        "help",
+        "mode",
+        "notify",
+    ]
+    assert [type(call["scope"]).__name__ for call in bot.calls] == [
+        "BotCommandScopeDefault",
+        "BotCommandScopeAllGroupChats",
+        "BotCommandScopeAllPrivateChats",
+        "BotCommandScopeAllChatAdministrators",
+        "BotCommandScopeChat",
+    ]
+    assert [call["method"] for call in bot.calls] == [
+        "delete_my_commands",
+        "delete_my_commands",
+        "delete_my_commands",
+        "set_my_commands",
+        "set_my_commands",
+    ]
+    assert bot.calls[3]["commands"] == list(BOT_COMMANDS)
+    assert bot.calls[4]["commands"] == list(BOT_COMMANDS)
+    assert bot.calls[4]["scope"].chat_id == 42

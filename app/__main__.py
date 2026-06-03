@@ -9,6 +9,14 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+)
 
 from app.cache.redis import (
     BlacklistRepository,
@@ -39,6 +47,12 @@ ALLOWED_UPDATES: tuple[str, ...] = (
     "chat_member",
 )
 RESTORED_TIMER_SAFETY_MARGIN_SECONDS = 0.25
+BOT_COMMANDS: tuple[BotCommand, ...] = (
+    BotCommand(command="admin", description="панель администратора"),
+    BotCommand(command="help", description="помощь по командам"),
+    BotCommand(command="mode", description="режим модерации"),
+    BotCommand(command="notify", description="получатель уведомлений"),
+)
 
 
 @dataclass(frozen=True)
@@ -194,6 +208,21 @@ async def restore_pending_verification_timers(
     return restored
 
 
+async def set_bot_commands(bot: Any, settings: Settings) -> None:
+    await bot.delete_my_commands(scope=BotCommandScopeDefault())
+    await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
+    await bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
+    await bot.set_my_commands(
+        list(BOT_COMMANDS),
+        scope=BotCommandScopeAllChatAdministrators(),
+    )
+    if settings.admin_id is not None:
+        await bot.set_my_commands(
+            list(BOT_COMMANDS),
+            scope=BotCommandScopeChat(chat_id=settings.admin_id),
+        )
+
+
 async def on_startup(
     *,
     bot: Any,
@@ -205,6 +234,7 @@ async def on_startup(
     **_: Any,
 ) -> None:
     await redis_client.ping()
+    await set_bot_commands(bot, settings)
     await restore_pending_verification_timers(
         redis_client=redis_client,
         bot=bot,

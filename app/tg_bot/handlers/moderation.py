@@ -7,7 +7,7 @@ from aiogram.types import Message
 
 from app.config import Settings
 from app.cache.redis import BlacklistRepository, RuntimeSettingsRepository
-from app.core.models import ActionMode, SpamDetectionResult, StopWordCheckResult
+from app.core.models import ActionMode, SpamDetectionResult
 from app.core.services.moderation import ModerationService
 from app.core.services.spam_detector import SpamDetectorService
 
@@ -50,22 +50,6 @@ async def handle_text_message(
     chat_id = getattr(chat, "id", None)
     if user_id is None or chat_id is None:
         return None
-
-    if await blacklist_repository.contains(chat_id=int(chat_id), user_id=int(user_id)):
-        result = SpamDetectionResult(
-            is_spam=True,
-            reason="blacklisted_user",
-            stop_word=StopWordCheckResult(matched=False),
-        )
-        return await _apply_moderation_action(
-            message=message,
-            result=result,
-            blacklist_repository=blacklist_repository,
-            settings=settings,
-            moderation_service=moderation_service,
-            runtime_settings_repository=runtime_settings_repository,
-            bot=bot,
-        )
 
     result = await spam_detector_service.detect(text)
     return await _apply_moderation_action(

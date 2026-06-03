@@ -20,6 +20,7 @@ from app.tg_bot.handlers.admin import (
     is_admin_sender,
     is_authorized_admin_sender,
     parse_action_mode_argument,
+    parse_action_mode_callback_data,
 )
 
 
@@ -58,10 +59,14 @@ class FakeMessage:
     chat: SimpleNamespace | None = None
     answers: list[str] = field(default_factory=list)
     reply_markups: list[Any] = field(default_factory=list)
+    deleted: bool = False
 
     async def answer(self, text: str, **kwargs: Any) -> None:
         self.answers.append(text)
         self.reply_markups.append(kwargs.get("reply_markup"))
+
+    async def delete(self) -> None:
+        self.deleted = True
 
 
 @dataclass
@@ -89,10 +94,14 @@ class FakeCallbackQuery:
 @dataclass
 class FakeBot:
     admin_user_ids: set[int]
+    sent_messages: list[dict[str, Any]] = field(default_factory=list)
 
     async def get_chat_member(self, *, chat_id: int, user_id: int) -> SimpleNamespace:
         status = "administrator" if user_id in self.admin_user_ids else "member"
         return SimpleNamespace(status=status)
+
+    async def send_message(self, **kwargs: Any) -> None:
+        self.sent_messages.append(kwargs)
 
 
 def _settings(
@@ -136,6 +145,14 @@ def test_parse_action_mode_argument_reads_first_command_argument() -> None:
     assert parse_action_mode_argument("/mode@bot notify_admin now") == "notify_admin"
 
 
+def test_parse_action_mode_callback_data_reads_origin_chat_id() -> None:
+    assert parse_action_mode_callback_data("admin_mode:delete") == ("delete", None)
+    assert parse_action_mode_callback_data("admin_mode:delete:-100123") == (
+        "delete",
+        -100123,
+    )
+
+
 def test_build_admin_panel_has_commands_and_action_buttons() -> None:
     text = build_admin_panel_text(current_mode=ActionMode.DELETE)
     keyboard = build_action_mode_keyboard(current_mode=ActionMode.DELETE)
@@ -148,6 +165,17 @@ def test_build_admin_panel_has_commands_and_action_buttons() -> None:
     )
     assert keyboard.inline_keyboard[0][1].callback_data == (
         f"{ACTION_MODE_CALLBACK_PREFIX}:notify_admin"
+    )
+
+
+def test_build_action_keyboard_can_keep_group_context_for_private_panel() -> None:
+    keyboard = build_action_mode_keyboard(
+        current_mode=ActionMode.DELETE,
+        chat_id=-100123,
+    )
+
+    assert keyboard.inline_keyboard[0][0].callback_data == (
+        f"{ACTION_MODE_CALLBACK_PREFIX}:delete:-100123"
     )
 
 
@@ -260,6 +288,29 @@ def test_action_mode_command_rejects_non_admin_sender() -> None:
     asyncio.run(run())
 
 
+def test_action_mode_command_deletes_non_admin_group_command_when_bot_is_available() -> (
+    None
+):
+    async def run() -> None:
+        repository = FakeRuntimeSettingsRepository()
+        message = _message(text="/mode delete", user_id=99, username="other")
+        bot = FakeBot(admin_user_ids=set())
+
+        result = await handle_action_mode_command(
+            message=message,
+            settings=_settings(admin_id=None, admin_username=None),
+            runtime_settings_repository=repository,
+            bot=bot,
+        )
+
+        assert result is None
+        assert message.deleted is True
+        assert message.answers == []
+        assert bot.sent_messages == []
+
+    asyncio.run(run())
+
+
 def test_notification_target_command_sets_sender_as_private_target() -> None:
     async def run() -> None:
         repository = FakeRuntimeSettingsRepository()
@@ -315,6 +366,29 @@ def test_admin_panel_command_shows_keyboard_for_admin() -> None:
     asyncio.run(run())
 
 
+def test_admin_panel_command_sends_group_panel_to_private_chat() -> None:
+    async def run() -> None:
+        repository = FakeRuntimeSettingsRepository(action_mode=ActionMode.DELETE)
+        message = _message(text="/admin", user_id=99, username="other")
+        bot = FakeBot(admin_user_ids={99})
+
+        result = await handle_admin_panel_command(
+            message=message,
+            settings=_settings(admin_id=None, admin_username=None),
+            runtime_settings_repository=repository,
+            bot=bot,
+        )
+
+        assert result == ActionMode.DELETE
+        assert message.deleted is True
+        assert message.answers == []
+        assert bot.sent_messages[0]["chat_id"] == 99
+        assert "Панель администратора" in bot.sent_messages[0]["text"]
+        assert bot.sent_messages[0]["reply_markup"] is not None
+
+    asyncio.run(run())
+
+
 def test_action_mode_callback_sets_mode_and_edits_admin_panel() -> None:
     async def run() -> None:
         repository = FakeRuntimeSettingsRepository()
@@ -336,6 +410,35 @@ def test_action_mode_callback_sets_mode_and_edits_admin_panel() -> None:
         assert callback_query.answers == [{"text": "✅ Режим изменен: delete"}]
         assert "delete" in callback_message.edited_texts[0]
         assert callback_message.reply_markups[0] is not None
+
+    asyncio.run(run())
+
+
+def test_action_mode_callback_accepts_real_admin_from_private_panel_context() -> None:
+    async def run() -> None:
+        repository = FakeRuntimeSettingsRepository()
+        callback_message = FakeCallbackMessage(
+            chat=SimpleNamespace(id=99, type="private")
+        )
+        callback_query = FakeCallbackQuery(
+            data=f"{ACTION_MODE_CALLBACK_PREFIX}:delete:-100123",
+            from_user=SimpleNamespace(id=99, username="other"),
+            message=callback_message,
+        )
+
+        result = await handle_action_mode_callback(
+            callback_query=callback_query,
+            settings=_settings(admin_id=None, admin_username=None),
+            runtime_settings_repository=repository,
+            bot=FakeBot(admin_user_ids={99}),
+        )
+
+        assert result == ActionMode.DELETE
+        assert repository.action_mode == ActionMode.DELETE
+        assert callback_query.answers == [{"text": "✅ Режим изменен: delete"}]
+        assert callback_message.reply_markups[0].inline_keyboard[0][
+            0
+        ].callback_data == (f"{ACTION_MODE_CALLBACK_PREFIX}:delete:-100123")
 
     asyncio.run(run())
 

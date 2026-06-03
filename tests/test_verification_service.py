@@ -115,6 +115,7 @@ def test_verification_message_uses_clear_emoji_statuses() -> None:
     assert message.text.startswith("⚠️ Test User")
     assert VERIFY_BUTTON_TEXT == "✅ Я человек"
     assert message.reply_markup.inline_keyboard[0][0].text == "✅ Я человек"
+    assert "⏳ Осталось: 3:00" in message.text
     assert build_verification_timeout_message(timeout_seconds=180).startswith("❌")
 
 
@@ -307,7 +308,9 @@ def test_timeout_removes_unverified_user_with_mocked_bot() -> None:
     asyncio.run(run())
 
 
-def test_join_request_timeout_declines_bans_blacklists_and_cleans_pending() -> None:
+def test_join_request_timeout_declines_bans_without_blacklist_and_cleans_pending() -> (
+    None
+):
     async def run() -> None:
         redis = FakeRedis()
         pending_repository = PendingVerificationRepository(redis, ttl_seconds=180)
@@ -339,7 +342,7 @@ def test_join_request_timeout_declines_bans_blacklists_and_cleans_pending() -> N
         assert bot.declined_join_requests == [{"chat_id": -100123, "user_id": 42}]
         assert bot.bans == [{"chat_id": -100123, "user_id": 42}]
         assert bot.unbans == []
-        assert await blacklist_repository.contains(chat_id=-100123, user_id=42)
+        assert not await blacklist_repository.contains(chat_id=-100123, user_id=42)
         assert await pending_repository.get(chat_id=-100123, user_id=42) is None
 
     asyncio.run(run())

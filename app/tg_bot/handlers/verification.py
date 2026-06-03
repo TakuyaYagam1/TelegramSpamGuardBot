@@ -23,6 +23,7 @@ from app.logging import get_logger
 
 router = Router(name="verification")
 verification_timeout_tasks: dict[tuple[int, int], asyncio.Task[bool]] = {}
+verification_countdown_tasks: dict[tuple[int, int], asyncio.Task[bool]] = {}
 JOINED_MEMBER_STATUSES = {"member", "restricted"}
 PRE_JOIN_STATUSES = {"left", "kicked"}
 
@@ -57,6 +58,7 @@ async def handle_chat_join_request(
         user_full_name=user.full_name,
         timeout_seconds=settings.verify_timeout_seconds,
         task_registry=verification_timeout_tasks,
+        countdown_task_registry=verification_countdown_tasks,
         logger=get_logger("app"),
     )
 
@@ -104,6 +106,7 @@ async def handle_chat_member_update(
         user_full_name=user.full_name,
         timeout_seconds=settings.verify_timeout_seconds,
         task_registry=verification_timeout_tasks,
+        countdown_task_registry=verification_countdown_tasks,
         logger=get_logger("app"),
     )
 
@@ -140,4 +143,5 @@ async def on_verify_callback(
         pending_verification_repository=pending_verification_repository,
         verified_user_repository=verified_user_repository,
         task_registry=verification_timeout_tasks,
+        countdown_task_registry=verification_countdown_tasks,
     )

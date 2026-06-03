@@ -28,6 +28,7 @@ VERIFY_SUCCESS_CALLBACK_ANSWER = "✅ Готово, доступ открыт"
 VERIFY_SUCCESS_PRIVATE_MESSAGE = "✅ Готово, доступ открыт. Добро пожаловать в чат"
 VERIFY_WRONG_USER_CALLBACK_ANSWER = "❌ Эта кнопка не для вас"
 VERIFY_EXPIRED_CALLBACK_ANSWER = "❌ Проверка уже недействительна"
+COUNTDOWN_INTERVAL_SECONDS = 1
 UNVERIFIED_MEMBER_PERMISSIONS = ChatPermissions(can_send_messages=False)
 VERIFIED_MEMBER_PERMISSIONS = ChatPermissions(
     can_send_messages=True,
@@ -100,27 +101,39 @@ def format_minutes(minutes: int) -> str:
     return f"{normalized_minutes} минут"
 
 
+def format_countdown(seconds: float) -> str:
+    normalized_seconds = max(0, int(seconds))
+    minutes, remaining_seconds = divmod(normalized_seconds, 60)
+    return f"{minutes}:{remaining_seconds:02d}"
+
+
 def build_verification_message(
     *,
     user_id: int,
     user_full_name: str | None = None,
     timeout_seconds: int = 180,
+    remaining_seconds: int | None = None,
     chat_id: int | None = None,
 ) -> VerificationMessage:
     timeout_text = format_minutes(timeout_seconds // 60)
+    countdown_text = format_countdown(
+        timeout_seconds if remaining_seconds is None else remaining_seconds
+    )
     greeting = f"{user_full_name}, " if user_full_name else ""
     if chat_id is None:
         text = (
             f"⚠️ {greeting}подтвердите, что вы человек. "
             f"Нажмите кнопку «{VERIFY_BUTTON_TEXT}». "
-            f"У вас {timeout_text}, иначе вы будете удалены из чата."
+            f"У вас {timeout_text}, иначе вы будете удалены из чата.\n\n"
+            f"⏳ Осталось: {countdown_text}"
         )
     else:
         text = (
             f"⚠️ {greeting}подтвердите, что вы человек. "
             f"Нажмите кнопку «{VERIFY_BUTTON_TEXT}» в течение {timeout_text}. "
             "До подтверждения вы не можете читать и писать в группе. "
-            "После проверки бот откроет доступ к чату."
+            "После проверки бот откроет доступ к чату.\n\n"
+            f"⏳ Осталось: {countdown_text}"
         )
     reply_markup = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -246,6 +259,8 @@ async def _complete_pending_verification(
     user_id: int,
     approve_join_request: bool = False,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
 ) -> bool:
     pending = await pending_verification_repository.get(
         chat_id=chat_id, user_id=user_id
@@ -289,6 +304,11 @@ async def _complete_pending_verification(
         chat_id=pending.chat_id,
         user_id=pending.user_id,
     )
+    _cancel_verification_task(
+        task_registry=countdown_task_registry,
+        chat_id=pending.chat_id,
+        user_id=pending.user_id,
+    )
     await _call_telegram_api_best_effort(
         operation="delete_verification_message",
         call=bot.delete_message(
@@ -320,6 +340,8 @@ async def complete_verification_from_callback(
     pending_verification_repository: PendingVerificationRepository,
     verified_user_repository: VerifiedUserRepository,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
 ) -> bool:
     payload = parse_verify_callback_payload(getattr(callback_query, "data", None))
     from_user = getattr(callback_query, "from_user", None)
@@ -368,6 +390,7 @@ async def complete_verification_from_callback(
         user_id=pending.user_id,
         approve_join_request=payload.chat_id is not None,
         task_registry=task_registry,
+        countdown_task_registry=countdown_task_registry,
     )
     if not completed:
         await callback_query.answer(
@@ -386,6 +409,8 @@ async def remove_unverified_user_after_timeout(
     chat_id: int,
     user_id: int,
     timeout_seconds: float,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     await asyncio.sleep(timeout_seconds)
@@ -412,6 +437,11 @@ async def remove_unverified_user_after_timeout(
         logger=event_logger,
     )
     await pending_verification_repository.delete(chat_id=chat_id, user_id=user_id)
+    _cancel_verification_task(
+        task_registry=countdown_task_registry,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
     await _call_telegram_api_best_effort(
         operation="delete_verification_message",
         call=bot.delete_message(
@@ -462,6 +492,8 @@ async def block_unverified_join_request_after_timeout(
     chat_id: int,
     user_id: int,
     timeout_seconds: float,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     await asyncio.sleep(timeout_seconds)
@@ -486,7 +518,6 @@ async def block_unverified_join_request_after_timeout(
             user_id=user_id,
             logger=event_logger,
         )
-    await blacklist_repository.add(chat_id=chat_id, user_id=user_id)
     await _call_telegram_api_best_effort(
         operation="verification_timeout_decline_join_request",
         call=bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id),
@@ -502,6 +533,11 @@ async def block_unverified_join_request_after_timeout(
         logger=event_logger,
     )
     await pending_verification_repository.delete(chat_id=chat_id, user_id=user_id)
+    _cancel_verification_task(
+        task_registry=countdown_task_registry,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
 
     log_app_event(
         event_logger,
@@ -522,6 +558,8 @@ def schedule_unverified_user_removal(
     user_id: int,
     timeout_seconds: float,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
     logger: logging.Logger | None = None,
 ) -> asyncio.Task[bool]:
     task = asyncio.create_task(
@@ -531,6 +569,7 @@ def schedule_unverified_user_removal(
             chat_id=chat_id,
             user_id=user_id,
             timeout_seconds=timeout_seconds,
+            countdown_task_registry=countdown_task_registry,
             logger=logger,
         )
     )
@@ -552,6 +591,8 @@ def schedule_join_request_timeout(
     user_id: int,
     timeout_seconds: float,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
     logger: logging.Logger | None = None,
 ) -> asyncio.Task[bool]:
     task = asyncio.create_task(
@@ -562,6 +603,83 @@ def schedule_join_request_timeout(
             chat_id=chat_id,
             user_id=user_id,
             timeout_seconds=timeout_seconds,
+            countdown_task_registry=countdown_task_registry,
+            logger=logger,
+        )
+    )
+    _register_verification_task(
+        task=task,
+        task_registry=task_registry,
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    return task
+
+
+async def update_verification_countdown(
+    *,
+    bot: Any,
+    pending_verification_repository: PendingVerificationRepository,
+    chat_id: int,
+    user_id: int,
+    user_full_name: str | None,
+    timeout_seconds: int,
+    join_request: bool = False,
+    logger: logging.Logger | None = None,
+) -> bool:
+    event_logger = logger or get_logger("app")
+    for remaining_seconds in range(timeout_seconds - 1, 0, -1):
+        await asyncio.sleep(COUNTDOWN_INTERVAL_SECONDS)
+        pending = await pending_verification_repository.get(
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+        if pending is None:
+            return False
+
+        verification_message = build_verification_message(
+            user_id=user_id,
+            user_full_name=user_full_name,
+            timeout_seconds=timeout_seconds,
+            remaining_seconds=remaining_seconds,
+            chat_id=chat_id if join_request else None,
+        )
+        await _call_telegram_api_best_effort(
+            operation="edit_verification_countdown",
+            call=bot.edit_message_text(
+                chat_id=pending.verification_chat_id or pending.chat_id,
+                message_id=pending.verification_message_id,
+                text=verification_message.text,
+                reply_markup=verification_message.reply_markup,
+            ),
+            chat_id=chat_id,
+            user_id=user_id,
+            logger=event_logger,
+        )
+    return True
+
+
+def schedule_verification_countdown(
+    *,
+    bot: Any,
+    pending_verification_repository: PendingVerificationRepository,
+    chat_id: int,
+    user_id: int,
+    user_full_name: str | None,
+    timeout_seconds: int,
+    join_request: bool = False,
+    task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    logger: logging.Logger | None = None,
+) -> asyncio.Task[bool]:
+    task = asyncio.create_task(
+        update_verification_countdown(
+            bot=bot,
+            pending_verification_repository=pending_verification_repository,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_full_name=user_full_name,
+            timeout_seconds=timeout_seconds,
+            join_request=join_request,
             logger=logger,
         )
     )
@@ -608,26 +726,11 @@ async def start_join_request_verification(
     user_full_name: str | None,
     timeout_seconds: int,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     event_logger = logger or get_logger("app")
-    if await blacklist_repository.contains(chat_id=chat_id, user_id=user_id):
-        await _call_telegram_api_best_effort(
-            operation="decline_blacklisted_join_request",
-            call=bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id),
-            chat_id=chat_id,
-            user_id=user_id,
-            logger=event_logger,
-        )
-        await _call_telegram_api_best_effort(
-            operation="ban_blacklisted_join_request",
-            call=bot.ban_chat_member(chat_id=chat_id, user_id=user_id),
-            chat_id=chat_id,
-            user_id=user_id,
-            logger=event_logger,
-        )
-        return False
-
     pending = await pending_verification_repository.get(
         chat_id=chat_id, user_id=user_id
     )
@@ -656,8 +759,21 @@ async def start_join_request_verification(
         user_id=user_id,
         timeout_seconds=timeout_seconds,
         task_registry=task_registry,
+        countdown_task_registry=countdown_task_registry,
         logger=event_logger,
     )
+    if countdown_task_registry is not None:
+        schedule_verification_countdown(
+            bot=bot,
+            pending_verification_repository=pending_verification_repository,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_full_name=user_full_name,
+            timeout_seconds=timeout_seconds,
+            join_request=True,
+            task_registry=countdown_task_registry,
+            logger=event_logger,
+        )
     log_app_event(
         event_logger,
         event="join_request_verification_started",
@@ -680,26 +796,11 @@ async def start_member_verification(
     timeout_seconds: int,
     message_thread_id: int | None = None,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
+    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
+    | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     event_logger = logger or get_logger("app")
-    if await blacklist_repository.contains(chat_id=chat_id, user_id=user_id):
-        await _call_telegram_api_best_effort(
-            operation="ban_blacklisted_member",
-            call=bot.ban_chat_member(chat_id=chat_id, user_id=user_id),
-            chat_id=chat_id,
-            user_id=user_id,
-            logger=event_logger,
-        )
-        await _call_telegram_api_best_effort(
-            operation="unban_blacklisted_member",
-            call=bot.unban_chat_member(chat_id=chat_id, user_id=user_id),
-            chat_id=chat_id,
-            user_id=user_id,
-            logger=event_logger,
-        )
-        return False
-
     pending = await pending_verification_repository.get(
         chat_id=chat_id, user_id=user_id
     )
@@ -733,8 +834,20 @@ async def start_member_verification(
         user_id=user_id,
         timeout_seconds=timeout_seconds,
         task_registry=task_registry,
+        countdown_task_registry=countdown_task_registry,
         logger=event_logger,
     )
+    if countdown_task_registry is not None:
+        schedule_verification_countdown(
+            bot=bot,
+            pending_verification_repository=pending_verification_repository,
+            chat_id=chat_id,
+            user_id=user_id,
+            user_full_name=user_full_name,
+            timeout_seconds=timeout_seconds,
+            task_registry=countdown_task_registry,
+            logger=event_logger,
+        )
     log_app_event(
         event_logger,
         event="member_verification_started",

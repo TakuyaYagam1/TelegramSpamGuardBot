@@ -26,9 +26,35 @@ ACTION_MODE_ALIASES = {
 ACTION_MODE_RESET_ALIASES = {"default", "env", "reset"}
 NOTIFICATION_TARGET_RESET_ALIASES = {"default", "env", "reset"}
 ADMIN_STATUSES = {"administrator", "creator"}
+GROUP_CHAT_TYPES = {"group", "supergroup"}
 
 
-def build_action_mode_keyboard(*, current_mode: ActionMode) -> InlineKeyboardMarkup:
+def _action_mode_callback_data(*, action: str, chat_id: int | None = None) -> str:
+    if chat_id is None:
+        return f"{ACTION_MODE_CALLBACK_PREFIX}:{action}"
+    return f"{ACTION_MODE_CALLBACK_PREFIX}:{action}:{chat_id}"
+
+
+def parse_action_mode_callback_data(data: str) -> tuple[str, int | None]:
+    parts = data.split(":")
+    if len(parts) < 2 or parts[0] != ACTION_MODE_CALLBACK_PREFIX:
+        return "", None
+
+    chat_id = None
+    if len(parts) >= 3:
+        try:
+            chat_id = int(parts[2])
+        except ValueError:
+            chat_id = None
+
+    return parts[1].casefold(), chat_id
+
+
+def build_action_mode_keyboard(
+    *,
+    current_mode: ActionMode,
+    chat_id: int | None = None,
+) -> InlineKeyboardMarkup:
     delete_text = (
         "✅ Удалять спам" if current_mode == ActionMode.DELETE else "Удалять спам"
     )
@@ -42,17 +68,26 @@ def build_action_mode_keyboard(*, current_mode: ActionMode) -> InlineKeyboardMar
             [
                 InlineKeyboardButton(
                     text=delete_text,
-                    callback_data=f"{ACTION_MODE_CALLBACK_PREFIX}:delete",
+                    callback_data=_action_mode_callback_data(
+                        action="delete",
+                        chat_id=chat_id,
+                    ),
                 ),
                 InlineKeyboardButton(
                     text=notify_text,
-                    callback_data=f"{ACTION_MODE_CALLBACK_PREFIX}:notify_admin",
+                    callback_data=_action_mode_callback_data(
+                        action="notify_admin",
+                        chat_id=chat_id,
+                    ),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="Сбросить к env",
-                    callback_data=f"{ACTION_MODE_CALLBACK_PREFIX}:reset",
+                    callback_data=_action_mode_callback_data(
+                        action="reset",
+                        chat_id=chat_id,
+                    ),
                 )
             ],
         ]
@@ -119,13 +154,69 @@ def _chat_id(message: Any) -> int | None:
     return None if raw_chat_id is None else int(raw_chat_id)
 
 
+def _is_group_chat(message: Any) -> bool:
+    chat = getattr(message, "chat", None)
+    if chat is None:
+        nested_message = getattr(message, "message", None)
+        chat = getattr(nested_message, "chat", None)
+
+    chat_type = str(getattr(chat, "type", "")).lower()
+    return chat_type in GROUP_CHAT_TYPES
+
+
+async def _delete_command_message(message: Any) -> None:
+    delete = getattr(message, "delete", None)
+    if not callable(delete):
+        return
+
+    try:
+        await delete()
+    except Exception:
+        pass
+
+
+async def _deny_admin_command(*, message: Any, bot: Any | None, text: str) -> None:
+    if bot is not None and _is_group_chat(message):
+        await _delete_command_message(message)
+        return
+
+    await message.answer(text)
+
+
+async def _send_admin_response(
+    *,
+    message: Any,
+    bot: Any | None,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    if bot is not None and _is_group_chat(message):
+        await _delete_command_message(message)
+        sender_id = _sender_id(message)
+        if sender_id is None:
+            return
+
+        try:
+            await bot.send_message(
+                chat_id=sender_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+        except Exception:
+            return
+        return
+
+    await message.answer(text, reply_markup=reply_markup)
+
+
 async def is_authorized_admin_sender(
     *,
     message: Any,
     settings: Settings,
     bot: Any | None = None,
+    chat_id: int | None = None,
 ) -> bool:
-    chat_id = _chat_id(message)
+    chat_id = chat_id or _chat_id(message)
     sender_id = _sender_id(message)
     if bot is not None and chat_id is not None and sender_id is not None:
         try:
@@ -173,8 +264,9 @@ async def _current_notification_target(
     message: Any,
     settings: Settings,
     runtime_settings_repository: RuntimeSettingsRepository,
+    chat_id: int | None = None,
 ) -> str | None:
-    chat_id = _chat_id(message)
+    chat_id = chat_id or _chat_id(message)
     if chat_id is None:
         return _settings_notification_target(settings)
 
@@ -218,9 +310,14 @@ async def handle_action_mode_command(
         settings=settings,
         bot=bot,
     ):
-        await message.answer("❌ Недостаточно прав для изменения режима модерации")
+        await _deny_admin_command(
+            message=message,
+            bot=bot,
+            text="❌ Недостаточно прав для изменения режима модерации",
+        )
         return None
 
+    chat_id = _chat_id(message)
     argument = parse_action_mode_argument(getattr(message, "text", None))
     if argument is None:
         current_mode = await runtime_settings_repository.get_action_mode(
@@ -230,33 +327,53 @@ async def handle_action_mode_command(
             message=message,
             settings=settings,
             runtime_settings_repository=runtime_settings_repository,
+            chat_id=chat_id,
         )
-        await message.answer(
-            build_admin_panel_text(
+        await _send_admin_response(
+            message=message,
+            bot=bot,
+            text=build_admin_panel_text(
                 current_mode=current_mode,
                 notification_target=notification_target,
             ),
-            reply_markup=build_action_mode_keyboard(current_mode=current_mode),
+            reply_markup=build_action_mode_keyboard(
+                current_mode=current_mode,
+                chat_id=chat_id,
+            ),
         )
         return current_mode
 
     if argument in ACTION_MODE_RESET_ALIASES:
         await runtime_settings_repository.reset_action_mode()
-        await message.answer(
-            f"✅ Runtime-режим сброшен. Активен режим из env: {settings.action_mode.value}",
-            reply_markup=build_action_mode_keyboard(current_mode=settings.action_mode),
+        await _send_admin_response(
+            message=message,
+            bot=bot,
+            text=f"✅ Runtime-режим сброшен. Активен режим из env: {settings.action_mode.value}",
+            reply_markup=build_action_mode_keyboard(
+                current_mode=settings.action_mode,
+                chat_id=chat_id,
+            ),
         )
         return settings.action_mode
 
     action_mode = ACTION_MODE_ALIASES.get(argument)
     if action_mode is None:
-        await message.answer("❌ Неверный режим. Доступно: delete или notify_admin")
+        await _send_admin_response(
+            message=message,
+            bot=bot,
+            text="❌ Неверный режим. Доступно: delete или notify_admin",
+        )
         return None
 
     await runtime_settings_repository.set_action_mode(action_mode)
-    await message.answer(
-        f"✅ Режим модерации изменен: {action_mode.value}",
-        reply_markup=build_action_mode_keyboard(current_mode=action_mode),
+    await _send_admin_response(
+        message=message,
+        bot=bot,
+        text=f"✅ Режим модерации изменен: {action_mode.value}",
+        reply_markup=build_action_mode_keyboard(
+            current_mode=action_mode,
+            chat_id=chat_id,
+        ),
     )
     return action_mode
 
@@ -273,9 +390,14 @@ async def handle_admin_panel_command(
         settings=settings,
         bot=bot,
     ):
-        await message.answer("❌ Недостаточно прав для панели администратора")
+        await _deny_admin_command(
+            message=message,
+            bot=bot,
+            text="❌ Недостаточно прав для панели администратора",
+        )
         return None
 
+    chat_id = _chat_id(message)
     current_mode = await runtime_settings_repository.get_action_mode(
         default=settings.action_mode
     )
@@ -283,13 +405,19 @@ async def handle_admin_panel_command(
         message=message,
         settings=settings,
         runtime_settings_repository=runtime_settings_repository,
+        chat_id=chat_id,
     )
-    await message.answer(
-        build_admin_panel_text(
+    await _send_admin_response(
+        message=message,
+        bot=bot,
+        text=build_admin_panel_text(
             current_mode=current_mode,
             notification_target=notification_target,
         ),
-        reply_markup=build_action_mode_keyboard(current_mode=current_mode),
+        reply_markup=build_action_mode_keyboard(
+            current_mode=current_mode,
+            chat_id=chat_id,
+        ),
     )
     return current_mode
 
@@ -306,12 +434,20 @@ async def handle_notification_target_command(
         settings=settings,
         bot=bot,
     ):
-        await message.answer("❌ Недостаточно прав для изменения уведомлений")
+        await _deny_admin_command(
+            message=message,
+            bot=bot,
+            text="❌ Недостаточно прав для изменения уведомлений",
+        )
         return None
 
     chat_id = _chat_id(message)
     if chat_id is None:
-        await message.answer("❌ Команда доступна только в чате")
+        await _send_admin_response(
+            message=message,
+            bot=bot,
+            text="❌ Команда доступна только в чате",
+        )
         return None
 
     argument = parse_notification_target_argument(getattr(message, "text", None))
@@ -320,23 +456,28 @@ async def handle_notification_target_command(
             message=message,
             settings=settings,
             runtime_settings_repository=runtime_settings_repository,
+            chat_id=chat_id,
         )
-        await message.answer(
-            "Текущий получатель уведомлений: "
+        await _send_admin_response(
+            message=message,
+            bot=bot,
+            text="Текущий получатель уведомлений: "
             f"{current_target or 'env/default'}\n\n"
             "Команды:\n"
             "/notify me\n"
             "/notify @username\n"
             "/notify 123456789\n"
-            "/notify reset"
+            "/notify reset",
         )
         return current_target
 
     if argument.casefold() in NOTIFICATION_TARGET_RESET_ALIASES:
         await runtime_settings_repository.reset_notification_target(chat_id=chat_id)
         target = _settings_notification_target(settings)
-        await message.answer(
-            f"✅ Получатель уведомлений сброшен: {target or 'env/default'}"
+        await _send_admin_response(
+            message=message,
+            bot=bot,
+            text=f"✅ Получатель уведомлений сброшен: {target or 'env/default'}",
         )
         return target
 
@@ -345,14 +486,22 @@ async def handle_notification_target_command(
         message=message,
     )
     if target is None:
-        await message.answer("❌ Укажи @username, numeric user_id, me или reset")
+        await _send_admin_response(
+            message=message,
+            bot=bot,
+            text="❌ Укажи @username, numeric user_id, me или reset",
+        )
         return None
 
     await runtime_settings_repository.set_notification_target(
         chat_id=chat_id,
         target=target,
     )
-    await message.answer(f"✅ Получатель уведомлений изменен: {target}")
+    await _send_admin_response(
+        message=message,
+        bot=bot,
+        text=f"✅ Получатель уведомлений изменен: {target}",
+    )
     return target
 
 
@@ -363,19 +512,20 @@ async def handle_action_mode_callback(
     runtime_settings_repository: RuntimeSettingsRepository,
     bot: Any | None = None,
 ) -> ActionMode | None:
+    data = str(getattr(callback_query, "data", ""))
+    argument, chat_id = parse_action_mode_callback_data(data)
+
     if not await is_authorized_admin_sender(
         message=callback_query,
         settings=settings,
         bot=bot,
+        chat_id=chat_id,
     ):
         await callback_query.answer(
             text="❌ Недостаточно прав для изменения режима",
             show_alert=True,
         )
         return None
-
-    data = str(getattr(callback_query, "data", ""))
-    argument = data.removeprefix(f"{ACTION_MODE_CALLBACK_PREFIX}:").casefold()
 
     if argument in ACTION_MODE_RESET_ALIASES:
         await runtime_settings_repository.reset_action_mode()
@@ -398,13 +548,17 @@ async def handle_action_mode_callback(
                 message=callback_query,
                 settings=settings,
                 runtime_settings_repository=runtime_settings_repository,
+                chat_id=chat_id,
             )
             await message.edit_text(
                 build_admin_panel_text(
                     current_mode=current_mode,
                     notification_target=notification_target,
                 ),
-                reply_markup=build_action_mode_keyboard(current_mode=current_mode),
+                reply_markup=build_action_mode_keyboard(
+                    current_mode=current_mode,
+                    chat_id=chat_id,
+                ),
             )
         except Exception:
             pass
