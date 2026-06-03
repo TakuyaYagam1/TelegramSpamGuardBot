@@ -5,19 +5,22 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from app.core.models import LLMDecision, StopWordCheckResult
-from app.core.services.spam_detector import SpamDetectorService, parse_llm_decision
+from app.domain import LLMDecision, StopWordCheckResult
+from app.usecase.moderation.spam_detector import (
+    SpamDetectorService,
+    parse_llm_decision,
+)
 
 
 @pytest.mark.parametrize(
     ("answer", "expected"),
     [
-        ("да", LLMDecision.SPAM),
-        ("Да.", LLMDecision.SPAM),
         (" yes! ", LLMDecision.SPAM),
-        ("нет", LLMDecision.NOT_SPAM),
-        ("Нет.", LLMDecision.NOT_SPAM),
         (" no ", LLMDecision.NOT_SPAM),
+        ("Yes, this is spam", LLMDecision.SPAM),
+        ("No, this is not spam", LLMDecision.NOT_SPAM),
+        ("да", LLMDecision.SPAM),
+        ("нет, это не спам", LLMDecision.NOT_SPAM),
         ("maybe", LLMDecision.UNKNOWN),
         ("", LLMDecision.UNKNOWN),
     ],
@@ -70,7 +73,7 @@ class FakeLLMCacheRepository:
 
 def test_detect_ignores_neutral_text_without_llm_call() -> None:
     async def run() -> None:
-        llm_client = FakeLLMClient(answers=["да"])
+        llm_client = FakeLLMClient(answers=["yes"])
         result = await SpamDetectorService(llm_client=llm_client).detect(
             "Обычное сообщение",
             stop_words=("казино",),
@@ -85,7 +88,7 @@ def test_detect_ignores_neutral_text_without_llm_call() -> None:
 
 def test_detect_uses_llm_answer_for_stop_word_message() -> None:
     async def run() -> None:
-        llm_client = FakeLLMClient(answers=["нет"])
+        llm_client = FakeLLMClient(answers=["no"])
         result = await SpamDetectorService(llm_client=llm_client).detect(
             "КАЗИНО прямо сейчас",
             stop_words=("казино",),
@@ -117,14 +120,14 @@ def test_detect_falls_back_to_stop_word_on_llm_timeout() -> None:
 
 def test_ask_llm_with_cache_uses_cached_answer_without_llm_call() -> None:
     async def run() -> None:
-        llm_client = FakeLLMClient(answers=["да"])
-        cache = FakeLLMCacheRepository(cached_answer="нет")
+        llm_client = FakeLLMClient(answers=["yes"])
+        cache = FakeLLMCacheRepository(cached_answer="no")
         answer = await SpamDetectorService(
             llm_client=llm_client,
             llm_cache_repository=cache,
         ).ask_llm_with_cache("казино")
 
-        assert answer == "нет"
+        assert answer == "no"
         assert cache.get_calls == ["казино"]
         assert cache.stored == []
         assert llm_client.calls == []
@@ -134,16 +137,16 @@ def test_ask_llm_with_cache_uses_cached_answer_without_llm_call() -> None:
 
 def test_ask_llm_with_cache_stores_cache_miss_answer() -> None:
     async def run() -> None:
-        llm_client = FakeLLMClient(answers=["да"])
+        llm_client = FakeLLMClient(answers=["yes"])
         cache = FakeLLMCacheRepository()
         answer = await SpamDetectorService(
             llm_client=llm_client,
             llm_cache_repository=cache,
         ).ask_llm_with_cache("казино")
 
-        assert answer == "да"
+        assert answer == "yes"
         assert cache.get_calls == ["казино"]
-        assert cache.stored == [("казино", "да")]
+        assert cache.stored == [("казино", "yes")]
         assert llm_client.calls == ["казино"]
 
     asyncio.run(run())

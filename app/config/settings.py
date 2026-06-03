@@ -1,9 +1,11 @@
+"""Pydantic settings model for environment-driven configuration"""
+
 from __future__ import annotations
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.core.models import ActionMode
+from app.domain import ActionMode
 
 
 class Settings(BaseSettings):

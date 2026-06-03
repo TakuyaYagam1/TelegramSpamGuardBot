@@ -4,7 +4,6 @@ import re
 import sys
 from pathlib import Path
 
-
 TARGET_RE = re.compile(r"^([a-zA-Z0-9_.-]+):.*##\s?(.*)$")
 GROUP_RE = re.compile(r"^##@\s?(.*)$")
 

@@ -1,4 +1,4 @@
-# Антиспам Telegram-бот
+# TelegramSpamGuardBot
 
 Telegram-бот для защиты групп и топиков от спама. Бот проверяет новых участников, удаляет неподтвержденных пользователей, анализирует сообщения по стоп-словам и при необходимости уточняет решение через LLM.
 
@@ -41,31 +41,70 @@ message -> duplicate flood check -> stop words -> LLM check -> delete / notify a
 ## Структура проекта
 
 ```text
-pyproject.toml            # project metadata, runtime deps, Ruff/Pytest config
+pyproject.toml             # метаданные проекта, зависимости, настройки Ruff/Pytest
 app/
-  __main__.py              # package entrypoint: python -m app
+  __main__.py              # точка входа пакета: python -m app
+  bootstrap/
+    application.py         # composition root и DI-сборка приложения
+    command.py             # регистрация команд в меню Telegram
+    lifecycle.py           # startup/shutdown хуки
+    verification_timer.py  # восстановление таймеров pending verification
   config/
     settings.py            # pydantic-settings и .env
-  core/
-    models.py              # domain models/enums
-    stopwords.py           # domain stop-word rules
-    services/              # application/domain services
+  domain/
+    moderation.py          # enum'ы модерации
+    spam.py                # value objects spam detection
+    stopword.py            # доменные правила stop-word
+    verification.py        # value objects верификации
+    data/
+      stopword/            # словари stop-word
+  usecase/
+    contract.py            # Protocol-порты для зависимостей usecase-слоя
+    moderation/
+      action.py            # сценарии delete / notify / warn / ban
+      flood_action.py      # Telegram-actions для duplicate flood
+      message.py           # форматирование moderation-сообщений и лог-текста
+      notification.py      # выбор и доставка admin notification
+      spam_detector.py     # stop-word + LLM decision flow
+    verification/
+      message.py           # тексты верификации и callback payloads
+      task.py              # registry задач таймеров верификации
+      timeout.py           # timeout и cleanup flow верификации
+      verification.py      # approval flow верификации
+  infrastructure/
     llm/
-      client.py            # LLM client facade
-      prompts.py           # LLM prompt builders
-  cache/
-    redis.py               # Redis client lifecycle and repositories
-  tg_bot/
-    handlers/              # Telegram transport routers: admin/user + feature routers
-    keyboards/             # Telegram reply/inline UI builders
-    middlewares/           # aiogram middleware extension points, Redis DI
-    states/                # FSM extension points
-    utils/                 # Telegram texts/helpers
+      client.py            # фасад LLM-клиента
+      prompt.py            # сборка LLM-промптов
+    redis/
+      client.py            # lifecycle Redis-клиента
+      repository/          # Redis-реализации repository-портов
+  bot/                    # Telegram transport layer: controller, keyboard и middleware
+    controller/
+      v1/                  # Telegram transport controller версии v1
+        admin/             # команды, callbacks, permissions и panel админа
+          callback.py
+          command.py
+          panel.py
+          permission.py
+          router.py
+        moderation/
+          action.py
+          flood.py
+          message.py
+          router.py
+        user.py
+        verification.py
+    keyboard/              # сборка reply/inline UI Telegram
+    middleware/            # aiogram middleware и Redis DI
+    state/                 # FSM extension points
+    util/                  # Telegram-тексты и helpers
 ```
 
-Handlers remain thin: they read Telegram updates, validate transport-specific fields and call services. Business rules for verification, spam detection, moderation actions, Redis repositories and LLM access live outside Telegram handlers. This keeps tests focused and allows replacing the transport layer without rewriting core behavior.
+`bot/controller/v1/` здесь выполняет роль transport controller для Telegram updates: принимает update, проверяет transport-specific поля и вызывает usecase. Бизнес-правила верификации, spam detection и moderation actions живут вне Telegram-слоя. Это держит тесты сфокусированными и позволяет заменить transport layer без переписывания core behavior.
 
-PostgreSQL, Alembic, `app/database/` and `migrations/` are intentionally not included in v1: the current product requirements use Redis-only storage. A relational layer should be added only when persistent relational data is required.
+Usecase-слой зависит от `Protocol`-портов из `app/usecase/contract.py`, а не от конкретных Redis/LLM-реализаций. Реализации этих портов лежат в `app/infrastructure`: например, `app/infrastructure/redis/repository/` означает не абстрактный repository-слой внутри Redis, а конкретные Redis-backed adapters для usecase-контрактов.
+
+PostgreSQL, Alembic, `app/database/` и `migrations/` намеренно не добавлены в v1: текущие требования используют Redis-only storage. Реляционный слой стоит добавлять только тогда, когда появятся постоянные relational data.
 
 ## Хранилище и LLM
 
@@ -93,8 +132,8 @@ LLM-интеграция работает через OpenAI-compatible `/chat/co
 
 Базовые spam-маркеры вынесены из Python-кода в packaged data:
 
-- `app/core/data/stopwords/spam_ru.txt` - русские фразы;
-- `app/core/data/stopwords/spam_en.txt` - английские фразы.
+- `app/domain/data/stopword/spam_ru.txt` - русские фразы;
+- `app/domain/data/stopword/spam_en.txt` - английские фразы.
 
 Формат простой: один термин или фраза на строку. Пустые строки и строки с `#` игнорируются, дубли убираются регистронезависимо. После изменения словарей достаточно пересобрать контейнер: `docker compose up -d --build`.
 
@@ -103,10 +142,12 @@ LLM-интеграция работает через OpenAI-compatible `/chat/co
 ## Стек
 
 - Python: `python:3.14.5-slim-trixie`
-- Telegram framework: `aiogram 3.x`
+- Telegram framework: `aiogram 3.28.2`
 - Cache/state storage: `redis:8.8.0-alpine3.23`
 - Runtime: Docker Compose
-- CI: GitHub Actions, pytest, Ruff, Docker Buildx
+- CI: GitHub Actions, pytest `9.0.3`, mypy `2.1.0`, Ruff `0.15.15`, Docker Buildx
+
+Python-зависимости зафиксированы как latest stable на момент обновления: прямые зависимости указаны exact-версиями в `pyproject.toml`, а транзитивные зависимости закреплены в `requirements.lock`. Docker, Makefile и CI ставят зависимости через `-c requirements.lock`, поэтому один и тот же commit собирает один и тот же dependency graph.
 
 ## Быстрый старт
 
@@ -142,7 +183,9 @@ make install       # установка зависимостей .[dev]
 make test          # pytest -q
 make lint          # ruff check
 make fmt           # ruff format
-make check         # lint + format check + tests + compileall + compose config
+make typecheck     # mypy app
+make check         # lint + format check + typecheck + tests + compileall + compose config
+make check-ci      # то же для CI, но с pytest-results.xml
 make up            # docker compose up -d --build
 make up-bot        # пересобрать и перезапустить только bot
 make logs-bot      # логи bot
@@ -229,8 +272,8 @@ LOG_FILE=/app/logs/spam.log
 На сервере должны быть установлены Docker и Docker Compose.
 
 ```bash
-git clone <repo-url> anti-spam-telegram-bot
-cd anti-spam-telegram-bot
+git clone <repo-url> TelegramSpamGuardBot
+cd TelegramSpamGuardBot
 cp .env.example .env
 nano .env
 docker compose up -d --build
@@ -259,14 +302,16 @@ docker compose exec bot sh -lc 'tail -f /app/logs/spam.log'
 
 В репозитории настроен CI для проверки инфраструктуры и контейнерной сборки.
 
-CI выполняет:
+CI выполняет `make check-ci ENV_FILE=.env.example`, поэтому локальные проверки и GitHub Actions используют один набор команд.
+
+CI проверяет:
 
 - запуск на каждом `push` в любую ветку, на pull request и вручную через `workflow_dispatch`;
-- отдельную job с pytest, если в репозитории есть тесты;
 - выгрузку `pytest-results.xml` в артефакты workflow;
-- проверку обязательных файлов;
-- линтинг Python-кода через Ruff;
+- lint через Ruff;
 - проверку форматирования через Ruff;
+- статическую проверку типов через mypy;
+- проверку обязательных файлов;
 - валидацию `docker compose config`;
 - сборку Docker-образа через Buildx;
 - запуск Redis;

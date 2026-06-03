@@ -1,3 +1,5 @@
+"""Observability package exports for logging helpers"""
+
 from app.observability.logging import (
     close_logger_handlers,
     configure_logging,

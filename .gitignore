@@ -5,10 +5,13 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+pytest-results.xml
 .ruff_cache/
 .mypy_cache/
 .coverage
 htmlcov/
+*.egg-info/
+build/
 .venv/
 venv/
 logs/

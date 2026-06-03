@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 from pydantic import SecretStr
 
+from app.bot.controller.v1.moderation import handle_text_message
 from app.config import Settings
-from app.core.models import (
+from app.domain import (
     ActionMode,
     DuplicateMessageState,
     LLMDecision,
@@ -17,8 +18,7 @@ from app.core.models import (
     StopWordCheckResult,
 )
 from app.observability.logging import close_logger_handlers, configure_logging
-from app.core.services.moderation import ModerationService
-from app.tg_bot.handlers.moderation import handle_text_message
+from app.usecase.moderation import ModerationService
 
 
 @dataclass
@@ -45,17 +45,6 @@ class AutoDeleteFakeBot(FakeBot):
     async def send_message(self, **kwargs: object) -> SimpleNamespace:
         self.sent_messages.append(kwargs)
         return SimpleNamespace(message_id=999)
-
-
-@dataclass
-class FakeBlacklistRepository:
-    added: list[tuple[int, int]] = field(default_factory=list)
-
-    async def add(self, *, chat_id: int, user_id: int) -> None:
-        self.added.append((chat_id, user_id))
-
-    async def contains(self, *, chat_id: int, user_id: int) -> bool:
-        return False
 
 
 @dataclass
@@ -164,6 +153,7 @@ def _message(
     document_unique_id: str | None = None,
     document_file_name: str | None = None,
     document_mime_type: str | None = None,
+    entities: list[SimpleNamespace] | None = None,
 ) -> SimpleNamespace:
     sticker = (
         None
@@ -181,6 +171,7 @@ def _message(
     )
     return SimpleNamespace(
         text=text,
+        entities=entities,
         message_id=message_id,
         message_thread_id=message_thread_id,
         sticker=sticker,
@@ -204,21 +195,19 @@ def _read_log(logger_name_log_file: Path) -> str:
     return logger_name_log_file.read_text(encoding="utf-8")
 
 
-def test_delete_action_deletes_ban_unbans_without_blacklist_and_logs(
+def test_delete_action_deletes_ban_unbans_and_logs(
     tmp_path: Path,
 ) -> None:
     async def run() -> None:
         log_file = tmp_path / "spam.log"
         logger = configure_logging(_settings(action_mode="delete", log_file=log_file))
         bot = FakeBot()
-        blacklist_repository = FakeBlacklistRepository()
 
         try:
             result = await ModerationService().delete_spam_message(
                 bot=bot,
                 message=_message(message_thread_id=777),
                 spam_result=_spam_result(),
-                blacklist_repository=blacklist_repository,
                 logger=logger,
             )
         finally:
@@ -231,7 +220,6 @@ def test_delete_action_deletes_ban_unbans_without_blacklist_and_logs(
         assert bot.bans == [{"chat_id": -100123, "user_id": 42}]
         assert bot.unbans == [{"chat_id": -100123, "user_id": 42}]
         assert bot.sent_messages == []
-        assert blacklist_repository.added == []
 
         log_text = _read_log(log_file)
         assert "spam_detected" in log_text
@@ -354,13 +342,11 @@ def test_text_moderation_uses_runtime_action_mode_over_env_default(
         settings = _settings(action_mode="notify_admin", log_file=log_file)
         logger = configure_logging(settings)
         bot = FakeBot()
-        blacklist_repository = FakeBlacklistRepository()
 
         try:
             result = await handle_text_message(
                 message=_message(message_thread_id=777),
                 spam_detector_service=FakeSpamDetectorService(),
-                blacklist_repository=blacklist_repository,
                 settings=settings,
                 moderation_service=ModerationService(),
                 runtime_settings_repository=FakeRuntimeSettingsRepository(
@@ -375,7 +361,85 @@ def test_text_moderation_uses_runtime_action_mode_over_env_default(
         assert result.moderation_action == ModerationAction.DELETE_MESSAGE
         assert bot.deleted_messages == [{"chat_id": -100123, "message_id": 55}]
         assert bot.sent_messages == []
-        assert blacklist_repository.added == []
+
+    asyncio.run(run())
+
+
+def test_unknown_slash_command_is_still_checked_by_moderation(tmp_path: Path) -> None:
+    async def run() -> None:
+        log_file = tmp_path / "spam.log"
+        settings = _settings(action_mode="delete", log_file=log_file)
+        bot = FakeBot()
+
+        result = await handle_text_message(
+            message=_message(text="/casino бесплатно"),
+            spam_detector_service=FakeSpamDetectorService(),
+            settings=settings,
+            moderation_service=ModerationService(),
+            runtime_settings_repository=FakeRuntimeSettingsRepository(
+                action_mode=ActionMode.DELETE
+            ),
+            bot=bot,
+        )
+
+        assert result is not None
+        assert result.moderation_action == ModerationAction.DELETE_MESSAGE
+        assert bot.deleted_messages == [{"chat_id": -100123, "message_id": 55}]
+        assert bot.bans == [{"chat_id": -100123, "user_id": 42}]
+
+    asyncio.run(run())
+
+
+def test_known_bot_control_command_is_not_moderated(tmp_path: Path) -> None:
+    async def run() -> None:
+        log_file = tmp_path / "spam.log"
+        settings = _settings(action_mode="delete", log_file=log_file)
+        bot = FakeBot()
+        spam_detector = FakeFloodSpamDetectorService()
+
+        result = await handle_text_message(
+            message=_message(text="/mode delete казино"),
+            spam_detector_service=spam_detector,
+            settings=settings,
+            moderation_service=ModerationService(),
+            runtime_settings_repository=FakeRuntimeSettingsRepository(
+                action_mode=ActionMode.DELETE
+            ),
+            bot=bot,
+        )
+
+        assert result is None
+        assert spam_detector.detect_calls == []
+        assert bot.deleted_messages == []
+        assert bot.bans == []
+
+    asyncio.run(run())
+
+
+def test_hidden_text_link_url_is_checked_by_spam_detector(tmp_path: Path) -> None:
+    async def run() -> None:
+        log_file = tmp_path / "spam.log"
+        settings = _settings(action_mode="notify_admin", log_file=log_file)
+        bot = FakeBot()
+        spam_detector = FakeFloodSpamDetectorService()
+
+        result = await handle_text_message(
+            message=_message(
+                text="переходи",
+                entities=[SimpleNamespace(url="https://casino.example/promo")],
+            ),
+            spam_detector_service=spam_detector,
+            settings=settings,
+            moderation_service=ModerationService(),
+            runtime_settings_repository=FakeRuntimeSettingsRepository(
+                action_mode=ActionMode.NOTIFY_ADMIN
+            ),
+            bot=bot,
+        )
+
+        assert result is not None
+        assert result.reason == "no_stop_word"
+        assert spam_detector.detect_calls == ["переходи https://casino.example/promo"]
 
     asyncio.run(run())
 
@@ -404,7 +468,6 @@ def test_duplicate_flood_deletes_duplicates_and_warns_user(tmp_path: Path) -> No
                 sticker_unique_id="same-sticker",
             ),
             spam_detector_service=spam_detector,
-            blacklist_repository=FakeBlacklistRepository(),
             settings=settings,
             moderation_service=ModerationService(),
             runtime_settings_repository=FakeRuntimeSettingsRepository(
@@ -500,7 +563,6 @@ def test_duplicate_flood_after_any_active_warning_kicks_without_new_warning(
                 sticker_unique_id="new-sticker",
             ),
             spam_detector_service=FakeFloodSpamDetectorService(),
-            blacklist_repository=FakeBlacklistRepository(),
             settings=settings,
             moderation_service=ModerationService(),
             runtime_settings_repository=FakeRuntimeSettingsRepository(
@@ -550,7 +612,6 @@ def test_media_file_metadata_is_checked_by_spam_detector(tmp_path: Path) -> None
                 document_mime_type="application/pdf",
             ),
             spam_detector_service=spam_detector,
-            blacklist_repository=FakeBlacklistRepository(),
             settings=settings,
             moderation_service=ModerationService(),
             runtime_settings_repository=FakeRuntimeSettingsRepository(
@@ -591,7 +652,6 @@ def test_duplicate_flood_repeated_after_warning_kicks_user(tmp_path: Path) -> No
                 message_id=14, text=None, sticker_unique_id="same-sticker"
             ),
             spam_detector_service=spam_detector,
-            blacklist_repository=FakeBlacklistRepository(),
             settings=settings,
             moderation_service=ModerationService(),
             runtime_settings_repository=FakeRuntimeSettingsRepository(

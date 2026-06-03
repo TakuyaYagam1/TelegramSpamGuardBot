@@ -3,15 +3,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 
-from app.cache.redis import (
-    BlacklistRepository,
+from app.domain import ActionMode
+from app.infrastructure.redis import (
     DuplicateMessageRepository,
     LLMResultCacheRepository,
     PendingVerificationRepository,
     RuntimeSettingsRepository,
     VerifiedUserRepository,
 )
-from app.core.models import ActionMode
 
 
 @dataclass
@@ -110,23 +109,6 @@ def test_verified_user_repository_marks_and_reads_key() -> None:
         assert redis.values["verified:-100123:42"] == "1"
         assert await repository.is_verified(chat_id=-100123, user_id=42) is True
         assert await repository.is_verified(chat_id=-100123, user_id=43) is False
-
-    asyncio.run(run())
-
-
-def test_blacklist_repository_adds_and_reads_key_without_ttl() -> None:
-    async def run() -> None:
-        redis = FakeRedis()
-        repository = BlacklistRepository(redis)
-
-        assert await repository.contains(chat_id=-100123, user_id=42) is False
-
-        await repository.add(chat_id=-100123, user_id=42)
-
-        assert redis.values["blacklist:-100123:42"] == "1"
-        assert "blacklist:-100123:42" not in redis.expirations
-        assert await repository.contains(chat_id=-100123, user_id=42) is True
-        assert await repository.contains(chat_id=-100123, user_id=43) is False
 
     asyncio.run(run())
 

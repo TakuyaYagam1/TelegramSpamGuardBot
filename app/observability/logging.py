@@ -1,3 +1,5 @@
+"""Structured logging configuration and event helpers"""
+
 from __future__ import annotations
 
 import logging
@@ -5,7 +7,6 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from app.config import Settings
-
 
 APP_LOGGER_NAME = "app"
 LOG_FIELD_DEFAULT = "-"

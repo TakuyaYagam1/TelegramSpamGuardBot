@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.core.stopwords import (
+from app.domain.stopword import (
     DEFAULT_STOPWORDS,
     check_stop_words,
     load_default_stop_words,

@@ -6,8 +6,10 @@ endif
 
 PYTHON ?= python
 PIP ?= $(PYTHON) -m pip
+PIP_VERSION ?= 26.1.2
 PYTEST ?= $(PYTHON) -m pytest
 RUFF ?= ruff
+MYPY ?= $(PYTHON) -m mypy
 COMPOSE ?= docker compose
 COMPOSE_CMD = $(COMPOSE) --env-file $(ENV_FILE)
 
@@ -29,14 +31,15 @@ env-init: ## Create .env from .env.example when .env is missing
 
 .PHONY: install
 install: ## Install runtime and dev dependencies into current Python environment
-	$(PIP) install --upgrade pip
-	$(PIP) install -e ".[dev]"
+	$(PIP) install --upgrade pip==$(PIP_VERSION)
+	$(PIP) install -c requirements.lock -e ".[dev]"
 
 .PHONY: doctor
 doctor: ## Print local tool versions
 	@$(PYTHON) --version
 	@$(PIP) --version
 	@$(RUFF) --version
+	@$(MYPY) --version
 	@$(COMPOSE) version
 
 # QUALITY ==============================================================================================================
@@ -50,6 +53,10 @@ test: ## Run test suite
 .PHONY: test-v
 test-v: ## Run test suite with verbose output
 	$(PYTEST) -ra -v
+
+.PHONY: test-ci
+test-ci: ## Run test suite with CI junit report
+	$(PYTEST) -ra --junitxml=pytest-results.xml
 
 .PHONY: test-one
 test-one: ## Run one test file or node, usage: make test-one path=tests/test_spam_detector.py
@@ -66,9 +73,17 @@ lint: ## Run Ruff lint checks without cache
 fmt: ## Format Python code with Ruff
 	$(RUFF) format .
 
+.PHONY: imports
+imports: ## Fix Python import ordering with Ruff
+	$(RUFF) check . --select I --fix
+
 .PHONY: fmt-check
 fmt-check: ## Check Python formatting
 	$(RUFF) format --check .
+
+.PHONY: typecheck
+typecheck: ## Run mypy static type checks
+	$(MYPY) app
 
 .PHONY: compile
 compile: ## Compile app and tests to catch syntax/import issues
@@ -79,7 +94,10 @@ compose-config: ## Validate docker compose config using ENV_FILE
 	$(COMPOSE_CMD) config --quiet
 
 .PHONY: check
-check: lint fmt-check test compile compose-config ## Run all local validation checks
+check: lint fmt-check typecheck test compile compose-config ## Run all local validation checks
+
+.PHONY: check-ci
+check-ci: lint fmt-check typecheck test-ci compile compose-config ## Run all CI validation checks with junit report
 
 .PHONY: clean
 clean: ## Remove local Python/test caches and generated coverage files

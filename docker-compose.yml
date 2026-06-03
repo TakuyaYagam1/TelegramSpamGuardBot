@@ -1,9 +1,10 @@
 services:
   bot:
+    container_name: telegram-spam-guard-bot
     build:
       context: .
       dockerfile: Dockerfile
-    image: anti-spam-telegram-bot
+    image: telegram-spam-guard-bot
     environment:
       BOT_TOKEN: ${BOT_TOKEN:-replace_me}
       TELEGRAM_PROXY_URL: ${TELEGRAM_PROXY_URL:-}
@@ -12,6 +13,7 @@ services:
       DUPLICATE_MESSAGE_WINDOW_SECONDS: ${DUPLICATE_MESSAGE_WINDOW_SECONDS:-60}
       DUPLICATE_MESSAGE_WARN_THRESHOLD: ${DUPLICATE_MESSAGE_WARN_THRESHOLD:-3}
       DUPLICATE_MESSAGE_WARNING_TTL_SECONDS: ${DUPLICATE_MESSAGE_WARNING_TTL_SECONDS:-300}
+      DUPLICATE_WARNING_MESSAGE_TTL_SECONDS: ${DUPLICATE_WARNING_MESSAGE_TTL_SECONDS:-60}
       ACTION_MODE: ${ACTION_MODE:-notify_admin}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_ID: ${ADMIN_ID:-}
@@ -19,6 +21,7 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.example.com/v1}
       LLM_MODEL: ${LLM_MODEL:-replace_me}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-8}
+      LLM_CACHE_TTL_SECONDS: ${LLM_CACHE_TTL_SECONDS:-300}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FILE: ${LOG_FILE:-/app/logs/spam.log}
     depends_on:

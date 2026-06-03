@@ -1,356 +1,48 @@
+"""Command-line entrypoint for running the bot application"""
+
 from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any
 
-from aiogram import Bot, Dispatcher
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.types import (
-    BotCommand,
-    BotCommandScopeAllChatAdministrators,
-    BotCommandScopeAllGroupChats,
-    BotCommandScopeAllPrivateChats,
-    BotCommandScopeChat,
-    BotCommandScopeDefault,
+from app.bootstrap.application import (
+    ALLOWED_UPDATES,
+    BotApplication,
+    create_application,
+    run_polling,
 )
-
-from app.cache.redis import (
-    BlacklistRepository,
-    DuplicateMessageRepository,
-    LLMResultCacheRepository,
-    PendingVerificationRepository,
-    RuntimeSettingsRepository,
-    VerifiedUserRepository,
-    create_redis_client,
+from app.bootstrap.command import BOT_COMMANDS, set_bot_commands
+from app.bootstrap.verification_timer import (
+    pending_verification_ttl_seconds,
+    restore_pending_verification_timer,
 )
-from app.config import Settings
-from app.core.llm.client import LLMClient
-from app.core.services.moderation import ModerationService
-from app.core.services.spam_detector import SpamDetectorService
-from app.core.services.verification import (
-    VerificationTaskRegistries,
-    schedule_join_request_timeout,
-)
-from app.observability.logging import configure_logging, get_logger, log_app_event
-from app.tg_bot.handlers import admin_router, user_router
-from app.tg_bot.middlewares import RedisMiddleware
-
-
-ALLOWED_UPDATES: tuple[str, ...] = (
-    "message",
-    "callback_query",
-    "chat_join_request",
-    "chat_member",
-)
-RESTORED_TIMER_SAFETY_MARGIN_SECONDS = 0.25
-BOT_COMMANDS: tuple[BotCommand, ...] = (
-    BotCommand(command="admin", description="панель администратора"),
-    BotCommand(command="help", description="помощь по командам"),
-    BotCommand(command="mode", description="режим модерации"),
-    BotCommand(command="notify", description="получатель уведомлений"),
-)
-
-
-@dataclass(frozen=True)
-class BotApplication:
-    bot: Any
-    dispatcher: Dispatcher
-    redis_client: Any
-    settings: Settings
-    verification_task_registries: VerificationTaskRegistries
-    allowed_updates: tuple[str, ...] = ALLOWED_UPDATES
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app",
-        description="Run the anti-spam Telegram bot.",
+        description="Run TelegramSpamGuardBot",
     )
     return parser
-
-
-def include_application_router(dispatcher: Dispatcher, router: Any) -> None:
-    if getattr(router, "parent_router", None) is not None:
-        # Module-level routers retain their parent; reset for repeatable factories
-        router._parent_router = None
-    dispatcher.include_router(router)
-
-
-def create_bot_session(settings: Settings) -> AiohttpSession | None:
-    if settings.telegram_proxy_url is None:
-        return None
-    return AiohttpSession(proxy=settings.telegram_proxy_url)
-
-
-def _redis_key_text(key: Any) -> str:
-    if isinstance(key, bytes):
-        return key.decode("utf-8", errors="replace")
-    return str(key)
-
-
-def _parse_pending_verification_key(key: str) -> tuple[int, int] | None:
-    parts = key.split(":")
-    if len(parts) != 3 or parts[0] != "verify":
-        return None
-
-    try:
-        return int(parts[1]), int(parts[2])
-    except ValueError:
-        return None
-
-
-def _restored_timer_delay(ttl_seconds: int) -> float:
-    if ttl_seconds <= 1:
-        return 0
-    return max(0, ttl_seconds - RESTORED_TIMER_SAFETY_MARGIN_SECONDS)
-
-
-async def _delete_unrestorable_verification_key(
-    *,
-    redis_client: Any,
-    key: str,
-    reason: str,
-    logger: logging.Logger,
-) -> None:
-    await redis_client.delete(key)
-    log_app_event(
-        logger,
-        event="pending_verification_restore_skipped",
-        action="delete_pending_verification",
-        details=f"key={key}; reason={reason}",
-    )
-
-
-async def restore_pending_verification_timers(
-    *,
-    redis_client: Any,
-    bot: Any,
-    pending_verification_repository: PendingVerificationRepository,
-    blacklist_repository: BlacklistRepository,
-    verification_task_registries: VerificationTaskRegistries,
-    settings: Settings,
-    logger: logging.Logger | None = None,
-) -> int:
-    event_logger = logger or get_logger("app")
-    restored = 0
-    async for raw_key in redis_client.scan_iter(match="verify:*"):
-        key = _redis_key_text(raw_key)
-        parsed_key = _parse_pending_verification_key(key)
-        if parsed_key is None:
-            await _delete_unrestorable_verification_key(
-                redis_client=redis_client,
-                key=key,
-                reason="invalid_key",
-                logger=event_logger,
-            )
-            continue
-        chat_id, user_id = parsed_key
-
-        ttl = await redis_client.ttl(key)
-        if ttl <= 0:
-            await _delete_unrestorable_verification_key(
-                redis_client=redis_client,
-                key=key,
-                reason=f"invalid_ttl:{ttl}",
-                logger=event_logger,
-            )
-            continue
-
-        try:
-            pending = await pending_verification_repository.get(
-                chat_id=chat_id,
-                user_id=user_id,
-            )
-        except KeyError, TypeError, ValueError:
-            await _delete_unrestorable_verification_key(
-                redis_client=redis_client,
-                key=key,
-                reason="invalid_payload",
-                logger=event_logger,
-            )
-            continue
-
-        if pending is None:
-            log_app_event(
-                event_logger,
-                event="pending_verification_restore_skipped",
-                chat_id=chat_id,
-                user_id=user_id,
-                action="skip_pending_verification",
-                details="pending record disappeared before timer restore",
-            )
-            continue
-
-        if pending.chat_id != chat_id or pending.user_id != user_id:
-            await _delete_unrestorable_verification_key(
-                redis_client=redis_client,
-                key=key,
-                reason="payload_key_mismatch",
-                logger=event_logger,
-            )
-            continue
-
-        schedule_join_request_timeout(
-            bot=bot,
-            pending_verification_repository=pending_verification_repository,
-            blacklist_repository=blacklist_repository,
-            chat_id=chat_id,
-            user_id=user_id,
-            timeout_seconds=_restored_timer_delay(
-                min(ttl, settings.verify_timeout_seconds)
-            ),
-            task_registry=verification_task_registries.timeout_tasks,
-            logger=event_logger,
-        )
-        restored += 1
-    return restored
-
-
-async def set_bot_commands(bot: Any, settings: Settings) -> None:
-    await bot.delete_my_commands(scope=BotCommandScopeDefault())
-    await bot.delete_my_commands(scope=BotCommandScopeAllGroupChats())
-    await bot.delete_my_commands(scope=BotCommandScopeAllPrivateChats())
-    await bot.set_my_commands(
-        list(BOT_COMMANDS),
-        scope=BotCommandScopeAllChatAdministrators(),
-    )
-    if settings.admin_id is not None:
-        await bot.set_my_commands(
-            list(BOT_COMMANDS),
-            scope=BotCommandScopeChat(chat_id=settings.admin_id),
-        )
-
-
-async def on_startup(
-    *,
-    bot: Any,
-    redis_client: Any,
-    pending_verification_repository: PendingVerificationRepository,
-    blacklist_repository: BlacklistRepository,
-    verification_task_registries: VerificationTaskRegistries,
-    settings: Settings,
-    logger: logging.Logger | None = None,
-    **_: Any,
-) -> None:
-    await redis_client.ping()
-    await set_bot_commands(bot, settings)
-    await restore_pending_verification_timers(
-        redis_client=redis_client,
-        bot=bot,
-        pending_verification_repository=pending_verification_repository,
-        blacklist_repository=blacklist_repository,
-        verification_task_registries=verification_task_registries,
-        settings=settings,
-        logger=logger,
-    )
-
-
-async def on_shutdown(
-    *,
-    bot: Any,
-    redis_client: Any,
-    verification_task_registries: VerificationTaskRegistries,
-    **_: Any,
-) -> None:
-    await verification_task_registries.cancel_all()
-    await bot.session.close()
-    try:
-        await redis_client.aclose(close_connection_pool=True)
-    except TypeError:
-        await redis_client.aclose()
-
-
-def create_application(
-    settings: Settings | None = None,
-    *,
-    bot_factory: Callable[..., Any] = Bot,
-    dispatcher_factory: Callable[[], Dispatcher] = Dispatcher,
-    redis_client: Any | None = None,
-) -> BotApplication:
-    resolved_settings = settings or Settings()
-    logger = configure_logging(resolved_settings)
-
-    bot_session = create_bot_session(resolved_settings)
-    bot_kwargs: dict[str, Any] = {
-        "token": resolved_settings.bot_token.get_secret_value()
-    }
-    if bot_session is not None:
-        bot_kwargs["session"] = bot_session
-    bot = bot_factory(**bot_kwargs)
-    dispatcher = dispatcher_factory()
-    redis = redis_client or create_redis_client(resolved_settings.redis_url)
-
-    pending_verification_repository = PendingVerificationRepository(
-        redis,
-        ttl_seconds=resolved_settings.verify_timeout_seconds,
-    )
-    verified_user_repository = VerifiedUserRepository(redis)
-    blacklist_repository = BlacklistRepository(redis)
-    runtime_settings_repository = RuntimeSettingsRepository(redis)
-    duplicate_message_repository = DuplicateMessageRepository(
-        redis,
-        ttl_seconds=resolved_settings.duplicate_message_window_seconds,
-        warning_ttl_seconds=resolved_settings.duplicate_message_warning_ttl_seconds,
-    )
-    llm_cache_repository = LLMResultCacheRepository(
-        redis,
-        ttl_seconds=resolved_settings.llm_cache_ttl_seconds,
-    )
-    llm_client = LLMClient.from_settings(resolved_settings)
-    spam_detector_service = SpamDetectorService(
-        llm_client=llm_client,
-        llm_cache_repository=llm_cache_repository,
-    )
-    moderation_service = ModerationService()
-    verification_task_registries = VerificationTaskRegistries()
-
-    dispatcher.update.outer_middleware(RedisMiddleware(redis))
-    include_application_router(dispatcher, admin_router)
-    include_application_router(dispatcher, user_router)
-    dispatcher.workflow_data.update(
-        {
-            "settings": resolved_settings,
-            "logger": logger,
-            "redis_client": redis,
-            "pending_verification_repository": pending_verification_repository,
-            "verified_user_repository": verified_user_repository,
-            "blacklist_repository": blacklist_repository,
-            "runtime_settings_repository": runtime_settings_repository,
-            "duplicate_message_repository": duplicate_message_repository,
-            "llm_client": llm_client,
-            "llm_cache_repository": llm_cache_repository,
-            "spam_detector_service": spam_detector_service,
-            "moderation_service": moderation_service,
-            "verification_task_registries": verification_task_registries,
-        }
-    )
-    dispatcher.startup.register(on_startup)
-    dispatcher.shutdown.register(on_shutdown)
-
-    return BotApplication(
-        bot=bot,
-        dispatcher=dispatcher,
-        redis_client=redis,
-        settings=resolved_settings,
-        verification_task_registries=verification_task_registries,
-    )
-
-
-async def run_polling() -> None:
-    application = create_application()
-    await application.dispatcher.start_polling(
-        application.bot,
-        allowed_updates=list(application.allowed_updates),
-    )
 
 
 def main() -> None:
     build_parser().parse_args()
     asyncio.run(run_polling())
+
+
+__all__ = [
+    "ALLOWED_UPDATES",
+    "BOT_COMMANDS",
+    "BotApplication",
+    "build_parser",
+    "create_application",
+    "main",
+    "pending_verification_ttl_seconds",
+    "restore_pending_verification_timer",
+    "run_polling",
+    "set_bot_commands",
+]
 
 
 if __name__ == "__main__":

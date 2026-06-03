@@ -7,9 +7,7 @@ from typing import Any
 
 from pydantic import SecretStr
 
-from app.config import Settings
-from app.core.models import ActionMode
-from app.tg_bot.handlers.admin import (
+from app.bot.controller.v1.admin import (
     ACTION_MODE_CALLBACK_PREFIX,
     build_action_mode_keyboard,
     build_admin_panel_text,
@@ -22,6 +20,8 @@ from app.tg_bot.handlers.admin import (
     parse_action_mode_argument,
     parse_action_mode_callback_data,
 )
+from app.config import Settings
+from app.domain import ActionMode
 
 
 @dataclass
@@ -221,6 +221,21 @@ def test_authorized_admin_sender_accepts_real_chat_admin_without_env_admin() -> 
     asyncio.run(run())
 
 
+def test_authorized_admin_sender_rejects_env_admin_without_real_group_rights() -> None:
+    async def run() -> None:
+        message = _message(text="/mode delete", user_id=42, username="admin_user")
+
+        result = await is_authorized_admin_sender(
+            message=message,
+            settings=_settings(admin_id=42, admin_username="@admin_user"),
+            bot=FakeBot(admin_user_ids=set()),
+        )
+
+        assert result is False
+
+    asyncio.run(run())
+
+
 def test_action_mode_command_sets_runtime_mode_for_admin() -> None:
     async def run() -> None:
         repository = FakeRuntimeSettingsRepository()
@@ -321,6 +336,27 @@ def test_action_mode_command_deletes_non_admin_group_command_when_bot_is_availab
     asyncio.run(run())
 
 
+def test_action_mode_command_rejects_env_admin_when_group_member_is_not_admin() -> None:
+    async def run() -> None:
+        repository = FakeRuntimeSettingsRepository()
+        message = _message(text="/mode delete", user_id=42, username="admin_user")
+        bot = FakeBot(admin_user_ids=set())
+
+        result = await handle_action_mode_command(
+            message=message,
+            settings=_settings(admin_id=42, admin_username="@admin_user"),
+            runtime_settings_repository=repository,
+            bot=bot,
+        )
+
+        assert result is None
+        assert repository.action_mode is None
+        assert message.deleted is True
+        assert message.answers == []
+
+    asyncio.run(run())
+
+
 def test_notification_target_command_sets_sender_as_private_target() -> None:
     async def run() -> None:
         repository = FakeRuntimeSettingsRepository()
@@ -335,6 +371,34 @@ def test_notification_target_command_sets_sender_as_private_target() -> None:
         assert result == "42"
         assert repository.notification_target == "42"
         assert message.answers == ["✅ Получатель уведомлений изменен: 42"]
+
+    asyncio.run(run())
+
+
+def test_action_mode_callback_rejects_env_admin_without_real_group_rights() -> None:
+    async def run() -> None:
+        repository = FakeRuntimeSettingsRepository()
+        callback_query = FakeCallbackQuery(
+            data=f"{ACTION_MODE_CALLBACK_PREFIX}:delete:-100123",
+            from_user=SimpleNamespace(id=42, username="admin_user"),
+            message=FakeCallbackMessage(chat=SimpleNamespace(id=42, type="private")),
+        )
+
+        result = await handle_action_mode_callback(
+            callback_query=callback_query,
+            settings=_settings(admin_id=42, admin_username="@admin_user"),
+            runtime_settings_repository=repository,
+            bot=FakeBot(admin_user_ids=set()),
+        )
+
+        assert result is None
+        assert repository.action_mode is None
+        assert callback_query.answers == [
+            {
+                "text": "❌ Недостаточно прав для изменения режима",
+                "show_alert": True,
+            }
+        ]
 
     asyncio.run(run())
 

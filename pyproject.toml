@@ -1,39 +1,51 @@
 [build-system]
-requires = ["setuptools>=77", "wheel"]
+requires = ["setuptools==82.0.1", "wheel==0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "anti-spam-telegram-bot"
+name = "TelegramSpamGuardBot"
 version = "0.1.0"
-description = "Telegram anti-spam bot with Redis-backed verification and LLM checks"
+description = "Telegram spam guard bot with Redis-backed verification and LLM checks"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "aiogram>=3,<4",
-    "aiohttp-socks>=0.10,<1",
-    "httpx>=0.28,<1",
-    "pydantic-settings>=2,<3",
-    "redis>=5,<7",
+    "aiogram==3.28.2",
+    "aiohttp-socks==0.11.0",
+    "httpx==0.28.1",
+    "pydantic-settings==2.14.1",
+    "redis==8.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9,<10",
-    "ruff>=0.14,<1",
+    "mypy==2.1.0",
+    "pytest==9.0.3",
+    "ruff==0.15.15",
+    "testcontainers[redis]==4.14.2",
 ]
 
 [project.scripts]
-anti-spam-telegram-bot = "app.__main__:main"
+telegram-spam-guard-bot = "app.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
 
 [tool.setuptools.package-data]
-"app.core.data.stopwords" = ["*.txt"]
+"app.domain.data.stopword" = ["*.txt"]
 
 [tool.ruff]
 line-length = 88
 target-version = "py314"
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["app"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

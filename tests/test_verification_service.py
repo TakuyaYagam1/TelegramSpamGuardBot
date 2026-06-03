@@ -1,20 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from app.cache.redis import (
-    BlacklistRepository,
+from app.infrastructure.redis import (
     PendingVerificationRepository,
     VerifiedUserRepository,
 )
-from app.core.services.verification import (
+from app.usecase.verification import (
     VERIFY_BUTTON_TEXT,
+    VERIFY_EXPIRED_CALLBACK_ANSWER,
     VERIFY_SUCCESS_CALLBACK_ANSWER,
     VERIFY_SUCCESS_PRIVATE_MESSAGE,
-    VerificationTaskRegistries,
+    VerificationTaskRegistry,
     block_unverified_join_request_after_timeout,
     build_verification_message,
     build_verification_timeout_message,
@@ -120,18 +122,18 @@ def test_verification_message_uses_clear_emoji_statuses() -> None:
     assert build_verification_timeout_message(timeout_seconds=180).startswith("❌")
 
 
-def test_verification_task_registries_cancel_all_tasks() -> None:
+def test_verification_task_registry_cancel_all_tasks() -> None:
     async def run() -> None:
-        registries = VerificationTaskRegistries()
+        registries = VerificationTaskRegistry()
         timeout_task = asyncio.create_task(_sleep_forever())
         countdown_task = asyncio.create_task(_sleep_forever())
-        registries.timeout_tasks[(-100123, 42)] = timeout_task
-        registries.countdown_tasks[(-100123, 42)] = countdown_task
+        registries.timeout_task[(-100123, 42)] = timeout_task
+        registries.countdown_task[(-100123, 42)] = countdown_task
 
         await registries.cancel_all()
 
-        assert registries.timeout_tasks == {}
-        assert registries.countdown_tasks == {}
+        assert registries.timeout_task == {}
+        assert registries.countdown_task == {}
         assert timeout_task.cancelled()
         assert countdown_task.cancelled()
 
@@ -183,18 +185,56 @@ def test_complete_verification_from_callback_marks_verified_and_cleans_pending()
     asyncio.run(run())
 
 
+def test_expired_callback_is_rejected_even_when_pending_key_still_exists() -> None:
+    async def run() -> None:
+        redis = FakeRedis()
+        pending_repository = PendingVerificationRepository(redis, ttl_seconds=240)
+        verified_repository = VerifiedUserRepository(redis)
+        await pending_repository.create(
+            user_id=42,
+            chat_id=-100123,
+            verification_message_id=777,
+            message_thread_id=555,
+        )
+        key = PendingVerificationRepository.key(-100123, 42)
+        payload = json.loads(redis.values[key])
+        payload["created_at"] = (datetime.now(UTC) - timedelta(seconds=181)).isoformat()
+        redis.values[key] = json.dumps(payload, ensure_ascii=False)
+        callback = FakeCallbackQuery(
+            data="verify_user:42",
+            from_user=SimpleNamespace(id=42),
+            message=SimpleNamespace(chat=SimpleNamespace(id=-100123)),
+        )
+        bot = FakeBot()
+
+        completed = await complete_verification_from_callback(
+            callback_query=callback,
+            bot=bot,
+            pending_verification_repository=pending_repository,
+            verified_user_repository=verified_repository,
+            timeout_seconds=180,
+        )
+
+        assert completed is False
+        assert not await verified_repository.is_verified(chat_id=-100123, user_id=42)
+        assert bot.restrictions == []
+        assert callback.answers == [
+            {"text": VERIFY_EXPIRED_CALLBACK_ANSWER, "show_alert": True}
+        ]
+
+    asyncio.run(run())
+
+
 def test_start_member_verification_restricts_and_sends_group_challenge() -> None:
     async def run() -> None:
         redis = FakeRedis()
         pending_repository = PendingVerificationRepository(redis, ttl_seconds=180)
-        blacklist_repository = BlacklistRepository(redis)
         bot = FakeBot()
         task_registry: dict[tuple[int, int], asyncio.Task[bool]] = {}
 
         started = await start_member_verification(
             bot=bot,
             pending_verification_repository=pending_repository,
-            blacklist_repository=blacklist_repository,
             chat_id=-100123,
             user_id=42,
             user_full_name="Test User",
@@ -221,14 +261,12 @@ def test_start_join_request_verification_sends_private_challenge() -> None:
     async def run() -> None:
         redis = FakeRedis()
         pending_repository = PendingVerificationRepository(redis, ttl_seconds=180)
-        blacklist_repository = BlacklistRepository(redis)
         task_registry: dict[tuple[int, int], asyncio.Task[bool]] = {}
         bot = FakeBot()
 
         started = await start_join_request_verification(
             bot=bot,
             pending_verification_repository=pending_repository,
-            blacklist_repository=blacklist_repository,
             chat_id=-100123,
             user_id=42,
             user_chat_id=4242,
@@ -327,13 +365,10 @@ def test_timeout_removes_unverified_user_with_mocked_bot() -> None:
     asyncio.run(run())
 
 
-def test_join_request_timeout_declines_bans_without_blacklist_and_cleans_pending() -> (
-    None
-):
+def test_join_request_timeout_declines_kicks_and_cleans_pending() -> None:
     async def run() -> None:
         redis = FakeRedis()
         pending_repository = PendingVerificationRepository(redis, ttl_seconds=180)
-        blacklist_repository = BlacklistRepository(redis)
         await pending_repository.create(
             user_id=42,
             chat_id=-100123,
@@ -345,7 +380,6 @@ def test_join_request_timeout_declines_bans_without_blacklist_and_cleans_pending
         removed = await block_unverified_join_request_after_timeout(
             bot=bot,
             pending_verification_repository=pending_repository,
-            blacklist_repository=blacklist_repository,
             chat_id=-100123,
             user_id=42,
             timeout_seconds=0,
@@ -360,8 +394,7 @@ def test_join_request_timeout_declines_bans_without_blacklist_and_cleans_pending
         ]
         assert bot.declined_join_requests == [{"chat_id": -100123, "user_id": 42}]
         assert bot.bans == [{"chat_id": -100123, "user_id": 42}]
-        assert bot.unbans == []
-        assert not await blacklist_repository.contains(chat_id=-100123, user_id=42)
+        assert bot.unbans == [{"chat_id": -100123, "user_id": 42}]
         assert await pending_repository.get(chat_id=-100123, user_id=42) is None
 
     asyncio.run(run())

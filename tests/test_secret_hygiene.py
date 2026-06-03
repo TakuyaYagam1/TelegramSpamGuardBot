@@ -4,15 +4,15 @@ import re
 import subprocess
 from pathlib import Path
 
+from pydantic import SecretStr
 
 from app.config import Settings
-from app.core.models import ActionMode
+from app.domain import ActionMode
 from app.observability.logging import (
     close_logger_handlers,
     configure_logging,
     log_app_event,
 )
-from pydantic import SecretStr
 
 TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{20,}\b")
 OPENROUTER_KEY_RE = re.compile(r"\b" + "sk" + r"-or-v1-[A-Za-z0-9_-]{20,}\b")
@@ -42,6 +42,8 @@ def test_env_files_are_ignored_except_example() -> None:
     assert re.search(r"(?m)^\.env$", gitignore)
     assert re.search(r"(?m)^\.env\.\*$", gitignore)
     assert re.search(r"(?m)^!\.env\.example$", gitignore)
+    assert re.search(r"(?m)^\*\.egg-info/$", gitignore)
+    assert re.search(r"(?m)^build/$", gitignore)
     assert Path(".env") not in _repository_files()
 
 
