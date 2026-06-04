@@ -4,6 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.bot.controller.v1.admin.argument import (
+    ACTION_MODE_ALIASES,
+    ACTION_MODE_RESET_ALIASES,
+    NOTIFICATION_TARGET_RESET_ALIASES,
+    current_notification_target,
+    normalize_notification_target_argument,
+    parse_action_mode_argument,
+    parse_notification_target_argument,
+    settings_notification_target,
+)
 from app.bot.controller.v1.admin.panel import (
     build_action_mode_keyboard,
     build_admin_panel_text,
@@ -13,87 +23,43 @@ from app.bot.controller.v1.admin.permission import (
     deny_admin_command,
     is_authorized_admin_sender,
     send_admin_response,
-    sender_id_from_message,
 )
 from app.config import Settings
 from app.domain import ActionMode
 from app.infrastructure.redis import RuntimeSettingsRepository
 
-ACTION_MODE_ALIASES = {
-    "delete": ActionMode.DELETE,
-    "notify": ActionMode.NOTIFY_ADMIN,
-    "notify_admin": ActionMode.NOTIFY_ADMIN,
-}
-ACTION_MODE_RESET_ALIASES = {"default", "env", "reset"}
-NOTIFICATION_TARGET_RESET_ALIASES = {"default", "env", "reset"}
 
-
-def parse_action_mode_argument(text: str | None) -> str | None:
-    if not text:
-        return None
-
-    parts = text.strip().split(maxsplit=1)
-    if len(parts) == 1:
-        return None
-    return parts[1].split(maxsplit=1)[0].casefold()
-
-
-def parse_notification_target_argument(text: str | None) -> str | None:
-    if not text:
-        return None
-
-    parts = text.strip().split(maxsplit=1)
-    if len(parts) == 1:
-        return None
-    return parts[1].strip() or None
-
-
-def settings_notification_target(settings: Settings) -> str | None:
-    if settings.admin_id is not None:
-        return str(settings.admin_id)
-    if settings.admin_username:
-        username = settings.admin_username.strip()
-        return username if username.startswith("@") else f"@{username}"
-    return None
-
-
-async def current_notification_target(
+async def send_admin_panel(
     *,
     message: Any,
     settings: Settings,
     runtime_settings_repository: RuntimeSettingsRepository,
+    bot: Any | None = None,
     chat_id: int | None = None,
-) -> str | None:
-    chat_id = chat_id or chat_id_from_message(message)
-    if chat_id is None:
-        return settings_notification_target(settings)
-
-    runtime_target = await runtime_settings_repository.get_notification_target(
-        chat_id=chat_id
+) -> ActionMode:
+    current_mode = await runtime_settings_repository.get_action_mode(
+        default=settings.action_mode,
+        chat_id=chat_id,
     )
-    return runtime_target or settings_notification_target(settings)
-
-
-def normalize_notification_target_argument(
-    *,
-    argument: str,
-    message: Any,
-) -> str | None:
-    normalized = argument.strip()
-    if not normalized:
-        return None
-
-    if normalized.casefold() == "me":
-        sender_id = sender_id_from_message(message)
-        return None if sender_id is None else str(sender_id)
-
-    if normalized.startswith("@") and len(normalized) > 1:
-        return normalized
-
-    if normalized.lstrip("-").isdigit():
-        return str(int(normalized))
-
-    return None
+    notification_target = await current_notification_target(
+        message=message,
+        settings=settings,
+        runtime_settings_repository=runtime_settings_repository,
+        chat_id=chat_id,
+    )
+    await send_admin_response(
+        message=message,
+        bot=bot,
+        text=build_admin_panel_text(
+            current_mode=current_mode,
+            notification_target=notification_target,
+        ),
+        reply_markup=build_action_mode_keyboard(
+            current_mode=current_mode,
+            chat_id=chat_id,
+        ),
+    )
+    return current_mode
 
 
 async def handle_action_mode_command(
@@ -118,29 +84,13 @@ async def handle_action_mode_command(
     chat_id = chat_id_from_message(message)
     argument = parse_action_mode_argument(getattr(message, "text", None))
     if argument is None:
-        current_mode = await runtime_settings_repository.get_action_mode(
-            default=settings.action_mode,
-            chat_id=chat_id,
-        )
-        notification_target = await current_notification_target(
+        return await send_admin_panel(
             message=message,
             settings=settings,
             runtime_settings_repository=runtime_settings_repository,
+            bot=bot,
             chat_id=chat_id,
         )
-        await send_admin_response(
-            message=message,
-            bot=bot,
-            text=build_admin_panel_text(
-                current_mode=current_mode,
-                notification_target=notification_target,
-            ),
-            reply_markup=build_action_mode_keyboard(
-                current_mode=current_mode,
-                chat_id=chat_id,
-            ),
-        )
-        return current_mode
 
     if argument in ACTION_MODE_RESET_ALIASES:
         await runtime_settings_repository.reset_action_mode(chat_id=chat_id)
@@ -196,30 +146,13 @@ async def handle_admin_panel_command(
         )
         return None
 
-    chat_id = chat_id_from_message(message)
-    current_mode = await runtime_settings_repository.get_action_mode(
-        default=settings.action_mode,
-        chat_id=chat_id,
-    )
-    notification_target = await current_notification_target(
+    return await send_admin_panel(
         message=message,
         settings=settings,
         runtime_settings_repository=runtime_settings_repository,
-        chat_id=chat_id,
-    )
-    await send_admin_response(
-        message=message,
         bot=bot,
-        text=build_admin_panel_text(
-            current_mode=current_mode,
-            notification_target=notification_target,
-        ),
-        reply_markup=build_action_mode_keyboard(
-            current_mode=current_mode,
-            chat_id=chat_id,
-        ),
+        chat_id=chat_id_from_message(message),
     )
-    return current_mode
 
 
 async def handle_notification_target_command(

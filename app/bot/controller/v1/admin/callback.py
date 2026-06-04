@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.bot.controller.v1.admin.command import (
+from app.bot.controller.v1.admin.argument import (
     ACTION_MODE_ALIASES,
     ACTION_MODE_RESET_ALIASES,
     current_notification_target,
