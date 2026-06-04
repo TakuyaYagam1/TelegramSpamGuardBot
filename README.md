@@ -48,6 +48,7 @@ app/
     application.py         # composition root и DI-сборка приложения
     command.py             # регистрация команд в меню Telegram
     lifecycle.py           # startup/shutdown хуки
+    verification_restore.py # helpers восстановления pending verification
     verification_timer.py  # восстановление таймеров pending verification
   config/
     settings.py            # pydantic-settings и .env
@@ -61,16 +62,23 @@ app/
   usecase/
     contract.py            # Protocol-порты для зависимостей usecase-слоя
     moderation/
-      action.py            # сценарии delete / notify / warn / ban
-      flood_action.py      # Telegram-actions для duplicate flood
+      action.py            # фасад ModerationService для delete / notify / warn / ban
+      auto_delete.py       # durable cleanup временных Telegram-сообщений
+      flood_action.py      # duplicate flood warning / cleanup / kick actions
       message.py           # форматирование moderation-сообщений и лог-текста
       notification.py      # выбор и доставка admin notification
+      spam_action.py       # delete / notify actions для confirmed spam
       spam_detector.py     # stop-word + LLM decision flow
+      stop_word_action.py  # Telegram-actions для stop-word warning
+      warning_action.py    # stop-word warning и cleanup warning-сообщений
     verification/
+      approval.py          # approval flow верификации
+      challenge.py         # отправка verification challenge
+      flow.py              # старт и cleanup верификации
       message.py           # тексты верификации и callback payloads
+      permission.py        # Telegram permissions для unverified/verified users
       task.py              # registry задач таймеров верификации
       timeout.py           # timeout и cleanup flow верификации
-      verification.py      # approval flow верификации
   infrastructure/
     llm/
       client.py            # фасад LLM-клиента
@@ -78,10 +86,11 @@ app/
     redis/
       client.py            # lifecycle Redis-клиента
       repository/          # Redis-реализации repository-портов
-  bot/                    # Telegram transport layer: controller, keyboard и middleware
+  bot/                     # Telegram transport layer: controller, keyboard и middleware
     controller/
       v1/                  # Telegram transport controller версии v1
         admin/             # команды, callbacks, permissions и panel админа
+          argument.py
           callback.py
           command.py
           panel.py
@@ -114,9 +123,12 @@ PostgreSQL, Alembic, `app/database/` и `migrations/` намеренно не д
 - `verified:{chat_id}:{user_id}` - отметка, что пользователь прошел верификацию;
 - `duplicate_message:{chat_id}:{user_id}` - текущая серия одинаковых сообщений пользователя с TTL;
 - `duplicate_message_warning:{chat_id}:{user_id}` - digest flood-сообщения, за которое пользователь уже получил предупреждение;
+- `duplicate_message_warning_grace:{chat_id}:{user_id}` - короткое окно после предупреждения, в котором повторы удаляются без kick;
+- `stop_word_warning:{chat_id}:{user_id}` - факт первого предупреждения за stop-word spam с TTL;
+- `auto_delete_message:{chat_id}:{message_id}` - pending cleanup временного warning-сообщения бота с TTL;
 - `llm:{sha256}` - кеш ответа LLM на нормализованный текст сообщения с TTL из `LLM_CACHE_TTL_SECONDS`.
 
-При старте приложение выполняет `PING` Redis и восстанавливает таймеры для активных `verify:*` ключей. Если ключ поврежден или не имеет TTL, он безопасно удаляется и событие пишется в лог. Восстановленный timeout для join request отклоняет заявку и банит пользователя.
+При старте приложение выполняет `PING` Redis, восстанавливает таймеры для активных `verify:*` ключей и задачи удаления временных `auto_delete_message:*` сообщений. Если ключ поврежден или не имеет TTL, он безопасно удаляется и событие пишется в лог. Восстановленный timeout для join request отклоняет заявку и банит пользователя.
 
 ## UX верификации
 
@@ -126,7 +138,7 @@ PostgreSQL, Alembic, `app/database/` и `migrations/` намеренно не д
 
 После нажатия кнопки бот вызывает `approve_chat_join_request`, удаляет приватное challenge-сообщение, отправляет личное `✅ Готово, доступ открыт`, отмечает пользователя как verified и очищает pending-запись. Если timeout истек, бот отправляет личное `❌ Проверка не пройдена`, вызывает `decline_chat_join_request`, `ban_chat_member` и удаляет pending-запись.
 
-LLM-интеграция работает через OpenAI-compatible `/chat/completions`: задаются `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` и timeout. В обычном spam-flow LLM вызывается только после совпадения stop-word, а ответ кешируется на `LLM_CACHE_TTL_SECONDS`, по умолчанию 300 секунд. Для файлов без текста бот проверяет доступные метаданные: `file_name`, `mime_type`, emoji/set name стикера и caption. Отдельно бот детерминированно отслеживает одинаковые сообщения подряд: текст сравнивается по нормализованной строке, стикеры и медиа - по `file_unique_id`. При достижении `DUPLICATE_MESSAGE_WARN_THRESHOLD` бот удаляет накопленные дубли и предупреждает пользователя. Warning ставится атомарно и не дублируется при параллельной обработке сообщений; следующий duplicate-flood в течение `DUPLICATE_MESSAGE_WARNING_TTL_SECONDS` приводит к kick через ban/unban. Ответы LLM `да/yes` считаются спамом, `нет/no` - не спамом; при timeout, ошибке или непонятном ответе обычный stop-word flow применяет fallback на ключевые слова.
+LLM-интеграция работает через OpenAI-compatible `/chat/completions`: задаются `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` и timeout. В обычном spam-flow LLM вызывается только после совпадения stop-word, а ответ кешируется на `LLM_CACHE_TTL_SECONDS`, по умолчанию 300 секунд. Первое confirmed stop-word spam-сообщение удаляется без kick: бот отправляет предупреждение `⚠️ Слово или фраза «казино» запрещены в чате. В следующий раз вы будете исключены из группы`, а само предупреждение удаляется через `STOP_WORD_WARNING_MESSAGE_TTL_SECONDS`. Повторное stop-word spam-сообщение в течение `STOP_WORD_WARNING_TTL_SECONDS` идет в обычный `ACTION_MODE`: в `delete` режиме пользователь будет исключен через ban/unban, в `notify_admin` режиме администратор получит уведомление. Для файлов без текста бот проверяет доступные метаданные: `file_name`, `mime_type`, emoji/set name стикера и caption. Отдельно бот детерминированно отслеживает одинаковые сообщения подряд: текст сравнивается по нормализованной строке, стикеры и медиа - по `file_unique_id`. При достижении `DUPLICATE_MESSAGE_WARN_THRESHOLD` бот удаляет накопленные дубли и предупреждает пользователя. Warning ставится атомарно и не дублируется при параллельной обработке сообщений. В течение `DUPLICATE_MESSAGE_KICK_GRACE_SECONDS`, по умолчанию 3 секунды, после предупреждения новые серии дублей удаляются без kick, чтобы пользователь успел заметить предупреждение. После grace-window повторный duplicate-flood в пределах `DUPLICATE_MESSAGE_WARNING_TTL_SECONDS` приводит к kick через ban/unban. Ответы LLM `да/yes` считаются спамом, `нет/no` - не спамом; при timeout, ошибке или непонятном ответе обычный stop-word flow применяет fallback на ключевые слова.
 
 ## Словари stop-words
 
@@ -212,7 +224,11 @@ VERIFY_TIMEOUT_SECONDS=180
 DUPLICATE_MESSAGE_WINDOW_SECONDS=60
 DUPLICATE_MESSAGE_WARN_THRESHOLD=3
 DUPLICATE_MESSAGE_WARNING_TTL_SECONDS=300
+DUPLICATE_MESSAGE_KICK_GRACE_SECONDS=3
 DUPLICATE_WARNING_MESSAGE_TTL_SECONDS=60
+STOP_WORD_WARNING_TTL_SECONDS=300
+STOP_WORD_WARNING_MESSAGE_TTL_SECONDS=60
+AUTO_DELETE_MESSAGE_CLEANUP_GRACE_SECONDS=86400
 ACTION_MODE=notify_admin
 ADMIN_USERNAME=@admin
 ADMIN_ID=
@@ -233,7 +249,11 @@ LOG_FILE=/app/logs/spam.log
 - `DUPLICATE_MESSAGE_WINDOW_SECONDS` - окно, в котором считаются одинаковые сообщения подряд от одного пользователя.
 - `DUPLICATE_MESSAGE_WARN_THRESHOLD` - сколько одинаковых сообщений подряд нужно для удаления дублей и предупреждения.
 - `DUPLICATE_MESSAGE_WARNING_TTL_SECONDS` - сколько действует предупреждение перед kick при новом таком же повторе.
+- `DUPLICATE_MESSAGE_KICK_GRACE_SECONDS` - сколько секунд после первого предупреждения удалять повторный flood без kick, по умолчанию 3.
 - `DUPLICATE_WARNING_MESSAGE_TTL_SECONDS` - через сколько секунд удалить warning-сообщение бота из чата.
+- `STOP_WORD_WARNING_TTL_SECONDS` - сколько действует первое предупреждение за stop-word spam.
+- `STOP_WORD_WARNING_MESSAGE_TTL_SECONDS` - через сколько секунд удалить warning-сообщение за stop-word spam.
+- `AUTO_DELETE_MESSAGE_CLEANUP_GRACE_SECONDS` - сколько дополнительно хранить pending cleanup warning-сообщений в Redis, чтобы бот мог удалить их после рестарта.
 - `ACTION_MODE` - реакция на спам: `delete` или `notify_admin`.
 - `ADMIN_USERNAME` / `ADMIN_ID` - fallback-получатель уведомлений для `notify_admin`.
 - `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_TIMEOUT_SECONDS` - параметры OpenAI-compatible LLM provider.
@@ -265,7 +285,7 @@ LOG_FILE=/app/logs/spam.log
 
 В меню Telegram `/` бот программно регистрирует только `/admin`, `/help`, `/mode` и `/notify` при старте через `bot.set_my_commands`. Для обычных участников групп и обычных личных чатов меню очищается, а команды показываются через `BotCommandScopeAllChatAdministrators` и персональный scope для `ADMIN_ID`. Аргументы вроде `/mode delete` и `/notify me` показываются внутри `/admin`, потому что Telegram command menu хранит только название команды и короткое описание.
 
-Значение, заданное через `/mode delete` или `/mode notify_admin`, хранится в Redis per-chat в ключе `settings:action_mode:{chat_id}` и имеет приоритет над `.env` только для конкретного чата. Старый глобальный ключ `settings:action_mode` читается как fallback для совместимости с ранними версиями. Команда `/mode reset` удаляет runtime override для текущего чата и возвращает режим из `ACTION_MODE`. Получатель из `/notify ...` хранится в Redis per-chat в ключе `settings:notification_target:{chat_id}`; numeric id отправляет уведомления в ЛС, `@username` оставляет уведомление в чате с mention.
+Значение, заданное через `/mode delete` или `/mode notify_admin`, хранится в Redis per-chat в ключе `settings:action_mode:{chat_id}` и имеет приоритет над `.env` только для конкретного чата. Старый глобальный ключ `settings:action_mode` читается как fallback для совместимости с ранними версиями. Команда `/mode reset` удаляет runtime override для текущего чата, очищает старый глобальный override и возвращает режим из `ACTION_MODE`. Получатель из `/notify ...` хранится в Redis per-chat в ключе `settings:notification_target:{chat_id}`; numeric id отправляет уведомления в ЛС, `@username` оставляет уведомление в чате с mention.
 
 ## Запуск на сервере
 
