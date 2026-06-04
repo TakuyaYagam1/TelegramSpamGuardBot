@@ -12,10 +12,7 @@ from app.domain import PendingVerification
 from app.observability.logging import get_logger, log_app_event
 from app.usecase.contract import PendingVerificationStore
 from app.usecase.verification.message import build_verification_timeout_message
-from app.usecase.verification.task import (
-    cancel_verification_task,
-    register_verification_task,
-)
+from app.usecase.verification.task import register_verification_task
 
 
 async def call_telegram_api_best_effort(
@@ -38,6 +35,53 @@ async def call_telegram_api_best_effort(
         return
 
 
+async def delete_verification_message_best_effort(
+    *,
+    bot: Any,
+    target_chat_id: int,
+    message_id: int,
+    chat_id: int,
+    user_id: int,
+    logger: logging.Logger,
+    operation: str = "delete_verification_message",
+) -> None:
+    await call_telegram_api_best_effort(
+        operation=operation,
+        call=bot.delete_message(
+            chat_id=target_chat_id,
+            message_id=message_id,
+        ),
+        chat_id=chat_id,
+        user_id=user_id,
+        logger=logger,
+    )
+
+
+async def ban_unban_user_best_effort(
+    *,
+    bot: Any,
+    chat_id: int,
+    user_id: int,
+    logger: logging.Logger,
+    ban_operation: str,
+    unban_operation: str,
+) -> None:
+    await call_telegram_api_best_effort(
+        operation=ban_operation,
+        call=bot.ban_chat_member(chat_id=chat_id, user_id=user_id),
+        chat_id=chat_id,
+        user_id=user_id,
+        logger=logger,
+    )
+    await call_telegram_api_best_effort(
+        operation=unban_operation,
+        call=bot.unban_chat_member(chat_id=chat_id, user_id=user_id),
+        chat_id=chat_id,
+        user_id=user_id,
+        logger=logger,
+    )
+
+
 async def remove_unverified_user_after_timeout(
     *,
     bot: Any,
@@ -45,8 +89,6 @@ async def remove_unverified_user_after_timeout(
     chat_id: int,
     user_id: int,
     timeout_seconds: float,
-    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
-    | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     await asyncio.sleep(timeout_seconds)
@@ -58,26 +100,15 @@ async def remove_unverified_user_after_timeout(
         return False
 
     event_logger = logger or get_logger("app")
-    await call_telegram_api(
-        operation="verification_timeout_ban",
-        call=bot.ban_chat_member(chat_id=chat_id, user_id=user_id),
+    await ban_unban_user_best_effort(
+        bot=bot,
         chat_id=chat_id,
         user_id=user_id,
         logger=event_logger,
-    )
-    await call_telegram_api(
-        operation="verification_timeout_unban",
-        call=bot.unban_chat_member(chat_id=chat_id, user_id=user_id),
-        chat_id=chat_id,
-        user_id=user_id,
-        logger=event_logger,
+        ban_operation="verification_timeout_ban",
+        unban_operation="verification_timeout_unban",
     )
     await pending_verification_repository.delete(chat_id=chat_id, user_id=user_id)
-    cancel_verification_task(
-        task_registry=countdown_task_registry,
-        chat_id=chat_id,
-        user_id=user_id,
-    )
     await delete_pending_verification_message(
         bot=bot,
         pending=pending,
@@ -104,8 +135,7 @@ async def block_unverified_join_request_after_timeout(
     chat_id: int,
     user_id: int,
     timeout_seconds: float,
-    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
-    | None = None,
+    configured_timeout_seconds: int | None = None,
     logger: logging.Logger | None = None,
 ) -> bool:
     await asyncio.sleep(timeout_seconds)
@@ -118,12 +148,19 @@ async def block_unverified_join_request_after_timeout(
 
     event_logger = logger or get_logger("app")
     if pending.verification_chat_id is not None:
+        await delete_pending_verification_message(
+            bot=bot,
+            pending=pending,
+            chat_id=chat_id,
+            user_id=user_id,
+            logger=event_logger,
+        )
         await call_telegram_api_best_effort(
             operation="send_verification_timeout_message",
             call=bot.send_message(
                 chat_id=pending.verification_chat_id,
                 text=build_verification_timeout_message(
-                    timeout_seconds=timeout_seconds
+                    timeout_seconds=configured_timeout_seconds or timeout_seconds
                 ),
             ),
             chat_id=chat_id,
@@ -137,26 +174,15 @@ async def block_unverified_join_request_after_timeout(
         user_id=user_id,
         logger=event_logger,
     )
-    await call_telegram_api_best_effort(
-        operation="verification_timeout_ban_join_request",
-        call=bot.ban_chat_member(chat_id=chat_id, user_id=user_id),
+    await ban_unban_user_best_effort(
+        bot=bot,
         chat_id=chat_id,
         user_id=user_id,
         logger=event_logger,
-    )
-    await call_telegram_api_best_effort(
-        operation="verification_timeout_unban_join_request",
-        call=bot.unban_chat_member(chat_id=chat_id, user_id=user_id),
-        chat_id=chat_id,
-        user_id=user_id,
-        logger=event_logger,
+        ban_operation="verification_timeout_ban_join_request",
+        unban_operation="verification_timeout_unban_join_request",
     )
     await pending_verification_repository.delete(chat_id=chat_id, user_id=user_id)
-    cancel_verification_task(
-        task_registry=countdown_task_registry,
-        chat_id=chat_id,
-        user_id=user_id,
-    )
 
     log_app_event(
         event_logger,
@@ -177,12 +203,10 @@ async def delete_pending_verification_message(
     user_id: int,
     logger: logging.Logger,
 ) -> None:
-    await call_telegram_api_best_effort(
-        operation="delete_verification_message",
-        call=bot.delete_message(
-            chat_id=pending.verification_chat_id or pending.chat_id,
-            message_id=pending.verification_message_id,
-        ),
+    await delete_verification_message_best_effort(
+        bot=bot,
+        target_chat_id=pending.verification_chat_id or pending.chat_id,
+        message_id=pending.verification_message_id,
         chat_id=chat_id,
         user_id=user_id,
         logger=logger,
@@ -197,8 +221,6 @@ def schedule_unverified_user_removal(
     user_id: int,
     timeout_seconds: float,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
-    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
-    | None = None,
     logger: logging.Logger | None = None,
 ) -> asyncio.Task[bool]:
     task = asyncio.create_task(
@@ -208,7 +230,6 @@ def schedule_unverified_user_removal(
             chat_id=chat_id,
             user_id=user_id,
             timeout_seconds=timeout_seconds,
-            countdown_task_registry=countdown_task_registry,
             logger=logger,
         )
     )
@@ -217,6 +238,7 @@ def schedule_unverified_user_removal(
         task_registry=task_registry,
         chat_id=chat_id,
         user_id=user_id,
+        logger=logger,
     )
     return task
 
@@ -228,9 +250,8 @@ def schedule_join_request_timeout(
     chat_id: int,
     user_id: int,
     timeout_seconds: float,
+    configured_timeout_seconds: int | None = None,
     task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]] | None = None,
-    countdown_task_registry: MutableMapping[tuple[int, int], asyncio.Task[bool]]
-    | None = None,
     logger: logging.Logger | None = None,
 ) -> asyncio.Task[bool]:
     task = asyncio.create_task(
@@ -240,7 +261,7 @@ def schedule_join_request_timeout(
             chat_id=chat_id,
             user_id=user_id,
             timeout_seconds=timeout_seconds,
-            countdown_task_registry=countdown_task_registry,
+            configured_timeout_seconds=configured_timeout_seconds,
             logger=logger,
         )
     )
@@ -249,5 +270,6 @@ def schedule_join_request_timeout(
         task_registry=task_registry,
         chat_id=chat_id,
         user_id=user_id,
+        logger=logger,
     )
     return task

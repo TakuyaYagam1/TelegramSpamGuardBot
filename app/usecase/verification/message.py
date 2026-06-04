@@ -70,39 +70,28 @@ def format_minutes(minutes: int) -> str:
     return f"{normalized_minutes} минут"
 
 
-def format_countdown(seconds: float) -> str:
-    normalized_seconds = max(0, int(seconds))
-    minutes, remaining_seconds = divmod(normalized_seconds, 60)
-    return f"{minutes}:{remaining_seconds:02d}"
-
-
 def build_verification_message(
     *,
     user_id: int,
     user_full_name: str | None = None,
     timeout_seconds: int = 180,
-    remaining_seconds: int | None = None,
     chat_id: int | None = None,
 ) -> VerificationMessage:
     timeout_text = format_minutes(timeout_seconds // 60)
-    countdown_text = format_countdown(
-        timeout_seconds if remaining_seconds is None else remaining_seconds
-    )
     greeting = f"{user_full_name}, " if user_full_name else ""
     if chat_id is None:
         text = (
             f"⚠️ {greeting}подтвердите, что вы человек. "
             f"Нажмите кнопку «{VERIFY_BUTTON_TEXT}». "
-            f"У вас {timeout_text}, иначе вы будете удалены из чата.\n\n"
-            f"⏳ Осталось: {countdown_text}"
+            f"У вас {timeout_text}, иначе вы будете удалены из чата."
         )
     else:
         text = (
             f"⚠️ {greeting}подтвердите, что вы человек. "
-            f"Нажмите кнопку «{VERIFY_BUTTON_TEXT}» в течение {timeout_text}. "
+            f"Нажмите кнопку «{VERIFY_BUTTON_TEXT}». "
+            f"У вас {timeout_text}, иначе заявка будет отклонена. "
             "До подтверждения вы не можете читать и писать в группе. "
-            "После проверки бот откроет доступ к чату.\n\n"
-            f"⏳ Осталось: {countdown_text}"
+            "После проверки бот откроет доступ к чату."
         )
     reply_markup = InlineKeyboardMarkup(
         inline_keyboard=[

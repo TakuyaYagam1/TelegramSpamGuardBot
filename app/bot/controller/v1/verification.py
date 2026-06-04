@@ -63,7 +63,6 @@ async def handle_chat_join_request(
         user_full_name=user.full_name,
         timeout_seconds=settings.verify_timeout_seconds,
         task_registry=verification_task_registry.timeout_task,
-        countdown_task_registry=verification_task_registry.countdown_task,
         logger=get_logger("app"),
     )
 
@@ -106,7 +105,6 @@ async def handle_chat_member_update(
             chat_id=update.chat.id,
             user_id=user.id,
             task_registry=verification_task_registry.timeout_task,
-            countdown_task_registry=verification_task_registry.countdown_task,
             logger=get_logger("app"),
         )
 
@@ -121,7 +119,6 @@ async def handle_chat_member_update(
         user_full_name=user.full_name,
         timeout_seconds=settings.verify_timeout_seconds,
         task_registry=verification_task_registry.timeout_task,
-        countdown_task_registry=verification_task_registry.countdown_task,
         logger=get_logger("app"),
     )
 
@@ -161,5 +158,4 @@ async def on_verify_callback(
         verified_user_repository=verified_user_repository,
         timeout_seconds=settings.verify_timeout_seconds,
         task_registry=verification_task_registry.timeout_task,
-        countdown_task_registry=verification_task_registry.countdown_task,
     )

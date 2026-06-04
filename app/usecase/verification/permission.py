@@ -7,7 +7,7 @@ from typing import Any
 
 from aiogram.types import ChatPermissions
 
-from app.usecase.verification.timeout import call_telegram_api_best_effort
+from app.bot.util.telegram_api import call_telegram_api
 
 UNVERIFIED_MEMBER_PERMISSIONS = ChatPermissions(can_send_messages=False)
 VERIFIED_MEMBER_PERMISSIONS = ChatPermissions(
@@ -32,7 +32,7 @@ async def restrict_unverified_member(
     user_id: int,
     logger: logging.Logger,
 ) -> None:
-    await call_telegram_api_best_effort(
+    await call_telegram_api(
         operation="restrict_unverified_member",
         call=bot.restrict_chat_member(
             chat_id=chat_id,

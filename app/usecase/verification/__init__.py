@@ -1,7 +1,6 @@
 """Verification usecase package exports"""
 
 from app.usecase.verification.approval import complete_verification_from_callback
-from app.usecase.verification.countdown import schedule_verification_countdown
 from app.usecase.verification.flow import (
     cleanup_pending_member_verification,
     start_join_request_verification,
@@ -45,7 +44,6 @@ __all__ = (
     "remove_unverified_user_after_timeout",
     "schedule_join_request_timeout",
     "schedule_unverified_user_removal",
-    "schedule_verification_countdown",
     "start_join_request_verification",
     "start_member_verification",
 )
